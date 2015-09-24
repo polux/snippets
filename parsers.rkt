@@ -14,6 +14,8 @@
 
 #lang racket
 
+(provide (all-defined-out))
+
 (require srfi/1)
 
 ; == Utility functions ==
@@ -402,5 +404,6 @@
 
 ; Demo
 
-(print ((p-sum) "10 + 2 * (3+2) * 1"))
-(newline (current-output-port))
+(module* main #f
+  (print ((p-sum) "10 + 2 * (3+2) * 1"))
+  (newline (current-output-port)))
