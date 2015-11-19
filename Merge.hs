@@ -23,12 +23,13 @@ toRelation :: Tree -> Relation
 toRelation (Node l ts) = S.map edge (S.fromList (map label ts)) `S.union` (S.unions (map toRelation ts))
   where edge l' = (l, l')
 
-clashes :: Relation -> Relation -> Relation
-clashes r1 r2 = (r1 `S.union` r2) `S.difference` (r1 `S.intersection` r2)
+clashes :: Relation -> Relation -> (Relation, Relation)
+clashes r1 r2 = (r1 `S.difference` r2, r2 `S.difference` r1)
 
-pretty :: Relation -> String
-pretty rs = unlines (map prettyEdge (S.toList rs))
-  where prettyEdge (a, b) = a ++ " -> " ++ b
+pretty :: (Relation, Relation) -> String
+pretty (r1, r2) = prettyRelation "tree 1" r1 ++ prettyRelation "tree 2" r2
+  where prettyRelation prefix r = unlines (map (prettyEdge prefix) (S.toList r))
+        prettyEdge prefix (a, b) = prefix ++ ": " ++ a ++ " -> " ++ b
 
 main = do
   s <- getContents
