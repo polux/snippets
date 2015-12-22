@@ -16,7 +16,9 @@
 import Debug.Trace
 import Data.List
 import Data.Maybe
+import Data.Function
 import qualified Data.Set as S
+import qualified Data.Map as M
 
 type FunctionSymbol = String
 type VariableSymbol = String
@@ -43,10 +45,6 @@ isAppl :: Term -> Bool
 isAppl (Appl _ _) = True
 isAppl _ = False
 
-sameFunName :: Term -> Term -> Bool
-sameFunName (Appl f _) (Appl g _) = f == g
-sameFunName _ _ = False
-
 functionsOfType :: Signature -> Type -> [FunctionSymbol]
 functionsOfType sig ty = map fst (filter ((== ty) . snd) sig)
 
@@ -57,10 +55,14 @@ typeOf sig funName = snd (head (filter ((== funName) . fst) sig))
 groupChildren :: [Term] -> [[Term]]
 groupChildren ts = transpose (map children ts)
 
+groupByKey :: Ord k => (a -> k) -> [a] -> [[a]]
+groupByKey key xs = M.elems (M.fromListWith (++) (map makeEntry xs))
+  where makeEntry x = (key x, [x])
+
 covers :: Signature -> [Term] -> Bool
 --covers _ ts | trace ("covers " ++ show ts) False = undefined
 covers sig [] = False
-covers sig ts = any isVar ts || (sameSet universe (map funName ts) && all childrenCoverSig (groupBy sameFunName ts))
+covers sig ts = any isVar ts || (sameSet universe (map funName ts) && all childrenCoverSig (groupByKey funName ts))
   where childrenCoverSig ts = all (covers sig) (groupChildren ts)
         universe = functionsOfType sig typeOfTs
         typeOfTs = typeOf sig (funName (head (filter isAppl ts)))
@@ -74,8 +76,7 @@ match t (Var x) = Just [(x, t)]
 
 solvable :: Signature -> Constraints -> Bool
 solvable sig cs = all (covers sig) groups
-  where groups = map (map snd) (groupBy sameVariable cs)
-        sameVariable (x, _) (y, _) = x == y
+  where groups = map (map snd) (groupByKey fst cs)
 
 subsumes :: Signature -> [Term] -> Term -> Bool
 subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
