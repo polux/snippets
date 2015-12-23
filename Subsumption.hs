@@ -12,7 +12,10 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 
+import Test.SmallCheck.Series
+import Test.SmallCheck
 import Debug.Trace
 import Data.List
 import Data.Maybe
@@ -50,7 +53,8 @@ closedTerms sig ty n = closedTerms' n ty
           return (Appl f ts)
 
 covers :: Signature -> [Term] -> Bool
-covers sig ps | all isVar ps = True
+covers _ ps | trace ("covers " ++ show ps) False = undefined
+covers sig ps | any isVar ps = True
               | otherwise = all matchesOnePattern closedTermOfMaxDepth
   where typeOfTs = typeOf sig (funName (head (filter isAppl ps)))
         maxDepth = maximum (map depth ps)
@@ -59,7 +63,7 @@ covers sig ps | all isVar ps = True
 
 instance Show Term where
   show (Appl f ts) = f ++ "(" ++ intercalate ", " (map show ts) ++ ")"
-  show (Var x) = x
+  show (Var x) = "V"++ x
 
 sameSet :: [FunctionSymbol] -> [FunctionSymbol] -> Bool
 sameSet fs1 fs2 = S.fromList fs1 == S.fromList fs2
@@ -98,9 +102,11 @@ solvable sig cs = all (covers sig) groups
   where groups = map (map snd) (groupByKey fst cs)
 
 subsumes :: Signature -> [Term] -> Term -> Bool
+subsumes sig [] p = False
 subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
   where subsumes' [] = False
-        subsumes' css = solvable sig (concat css)
+        subsumes' css | any null css = True
+                      | otherwise = solvable sig (concat css)
 
 minimize sig ps = minimize' ps []
   where minimize' [] kernel = kernel
@@ -143,14 +149,15 @@ example_patterns = [
   interp(Var "x", cons(undef(), Var "z_35_2")),
   interp(Var "x", cons(Var "z_35_1", cons(undef(), Var "z_40_2"))),
   interp(Var "x", cons(Var "z_35_1", cons(Var "z_40_1", cons(Var "z_45_1", Var "z_45_2"))))]
-    where interp(x, y) = Appl "interp" [x, y]
-          cons(x, y) = Appl "cons" [x, y]
-          bv(x) = Appl "bv" [x]
-          nv(x) = Appl "nv" [x]
-          undef() = Appl "undef" []
-          s(x) = Appl "s" [x]
-          z() = Appl "z" []
-          nil() = Appl "nil" []
+
+interp(x, y) = Appl "interp" [x, y]
+cons(x, y) = Appl "cons" [x, y]
+bv(x) = Appl "bv" [x]
+nv(x) = Appl "nv" [x]
+undef() = Appl "undef" []
+s(x) = Appl "s" [x]
+z() = Appl "z" []
+nil() = Appl "nil" []
 
 example_sig =
   [Decl "cons" "List" ["Val", "List"],
@@ -163,8 +170,21 @@ example_sig =
    Decl "true" "Bool" [],
    Decl "false" "Bool" []]
 
+instance Monad m => Serial m Term where
+  series = cons1 Var \/ cons1 (\x -> s(x)) \/ cons0 (z())
+
+property ps p = subsumes example_sig ps p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
+
+main_ = smallCheck 4 property
+
+main__ = print (subsumes example_sig example_patterns t)
+  where t = interp(s(s(z())), cons(bv(Var "z_38_1"), Var "z_35_2"))
+
+
 main = do
   print (length example_patterns)
   let res = (minimize example_sig example_patterns)
   print (length res)
   putStrLn (unlines (map show res))
+
+--main = putStrLn $ unlines $ map show $ (closedTerms example_sig "List" 2)
