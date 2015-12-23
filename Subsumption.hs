@@ -23,7 +23,6 @@ import qualified Data.Map as M
 type FunctionSymbol = String
 type VariableSymbol = String
 type Type = String
--- should be a Data.Bimpap but I don't want any other dep than base
 type Signature = [Decl]
 data Decl = Decl { symbol :: FunctionSymbol, range :: Type, domain :: [Type] }
 type Constraints = [(VariableSymbol, Term)]
@@ -103,15 +102,6 @@ subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
   where subsumes' [] = False
         subsumes' css = solvable sig (concat css)
 
-{-
-semantics :: Int -> Term -> S.Set [Term]
-semantics d p = 
-
-naiveSubsumes :: Signature -> [Term] -> Term -> Bool
-naiveSubsumes sig ps p = semantics d p `S.isSubsetOf` S.unions (map (semantics d) ps)
-  where d = maximum (map depth (p:ps))
--}
-
 minimize sig ps = minimize' ps []
   where minimize' [] kernel = kernel
         minimize' (p:ps) kernel =
@@ -122,37 +112,37 @@ minimize sig ps = minimize' ps []
         shortest xs ys = if length xs <= length ys then xs else ys
 
 example_patterns = [
-  interp(Var "x", cons(nv(Var "Z_73_1"), cons(bv(Var "Z_43_1"), Var "Z_40_2"))),
-  interp(Var "x", cons(undef(), Var "Z_35_2")),
-  interp(s(s(z())), nil()),
-  interp(s(s(s(s(s(Var "Z_99_1"))))), cons(Var "Z_35_1", nil())),
-  interp(Var "x", cons(bv(Var "Z_38_1"), cons(nv(Var "Z_83_1"), Var "Z_79_2"))),
-  interp(s(s(s(s(s(z()))))), cons(nv(Var "Z_51_1"), Var "Z_47_2")),
-  interp(Var "x", cons(Var "Z_35_1", cons(Var "Z_40_1", cons(Var "Z_45_1", Var "Z_45_2")))),
-  interp(s(s(Var "Z_493_1")), cons(nv(Var "Z_73_1"), nil())),
-  interp(z(), nil()),
-  interp(s(s(s(s(s(s(Var "Z_69_1")))))), cons(Var "Z_35_1", cons(bv(Var "Z_43_1"), Var "Z_40_2"))),
-  interp(s(s(z())), cons(bv(Var "Z_38_1"), Var "Z_35_2")),
-  interp(s(s(s(s(s(z()))))), cons(bv(Var "b1"), cons(bv(Var "b2"), nil()))),
-  interp(s(z()), nil()),
-  interp(s(z()), cons(nv(Var "n"), nil())),
-  interp(s(s(s(z()))), nil()),
-  interp(s(s(s(s(z())))), cons(bv(Var "b"), nil())),
-  interp(Var "x", cons(Var "Z_35_1", cons(undef(), Var "Z_40_2"))),
-  interp(s(s(s(s(s(s(Var "Z_69_1")))))), cons(bv(Var "Z_38_1"), Var "Z_35_2")),
-  interp(z(), cons(Var "Z_126_1", Var "Z_126_2")),
-  interp(s(s(z())), cons(Var "Z_35_1", cons(bv(Var "Z_43_1"), Var "Z_40_2"))),
-  interp(s(z()), cons(bv(Var "Z_38_1"), Var "Z_35_2")),
-  interp(s(s(s(s(s(s(s(Var "Z_33_1"))))))), Var "y"),
-  interp(s(s(s(s(z())))), cons(Var "Z_106_1", cons(Var "Z_111_1", Var "Z_111_2"))),
-  interp(s(z()), cons(Var "Z_555_1", cons(Var "Z_560_1", Var "Z_560_2"))),
+  interp(s(s(s(s(s(s(s(Var "z_33_1"))))))), Var "y"),
   interp(s(s(s(s(s(s(z())))))), cons(nv(Var "n1"), cons(nv(Var "n2"), nil()))),
-  interp(s(s(s(s(s(z()))))), cons(Var "Z_47_1", cons(nv(Var "Z_56_1"), Var "Z_52_2"))),
-  interp(s(s(s(s(z())))), cons(nv(Var "Z_51_1"), Var "Z_47_2")),
-  interp(s(s(s(s(Var "Z_124_1")))), nil()),
-  interp(s(s(z())), cons(Var "Z_35_1", nil())),
-  interp(s(s(s(z()))), cons(Var "Z_126_1",  Var "Z_126_2")),
-  interp(s(s(z())), cons(nv(Var "m"), cons(nv(Var "n"), nil())))]
+  interp(s(s(s(s(s(s(Var "z_69_1")))))), cons(bv(Var "z_38_1"), Var "z_35_2")),
+  interp(s(s(s(s(s(s(Var "z_69_1")))))), cons(Var "z_35_1", cons(bv(Var "z_43_1"), Var "z_40_2"))),
+  interp(s(s(s(s(s(z()))))), cons(bv(Var "b1"), cons(bv(Var "b2"), nil()))),
+  interp(s(s(s(s(s(z()))))), cons(nv(Var "z_51_1"), Var "z_47_2")),
+  interp(s(s(s(s(s(z()))))), cons(Var "z_47_1", cons(nv(Var "z_56_1"), Var "z_52_2"))),
+  interp(s(s(s(s(s(Var "z_99_1"))))), cons(Var "z_35_1", nil())),
+  interp(s(s(s(s(z())))), cons(bv(Var "b"), nil())),
+  interp(s(s(s(s(z())))), cons(nv(Var "z_51_1"), Var "z_47_2")),
+  interp(s(s(s(s(z())))), cons(Var "z_106_1", cons(Var "z_111_1", Var "z_111_2"))),
+  interp(s(s(s(s(Var "z_124_1")))), nil()),
+  interp(s(s(s(z()))), cons(Var "z_126_1", Var "z_126_2")),
+  interp(s(s(s(z()))), nil()),
+  interp(s(s(z())), cons(bv(Var "z_38_1"), Var "z_35_2")),
+  interp(s(s(z())), cons(nv(Var "m"), cons(nv(Var "n"), nil()))),
+  interp(s(s(z())), cons(Var "z_35_1", cons(bv(Var "z_43_1"), Var "z_40_2"))),
+  interp(s(s(z())), cons(Var "z_35_1", nil())),
+  interp(s(s(z())), nil()),
+  interp(s(s(Var "z_493_1")), cons(nv(Var "z_73_1"), nil())),
+  interp(s(z()), cons(bv(Var "z_38_1"), Var "z_35_2")),
+  interp(s(z()), cons(nv(Var "n"), nil())),
+  interp(s(z()), cons(Var "z_555_1", cons(Var "z_560_1", Var "z_560_2"))),
+  interp(s(z()), nil()),
+  interp(z(), cons(Var "z_126_1", Var "z_126_2")),
+  interp(z(), nil()),
+  interp(Var "x", cons(bv(Var "z_38_1"), cons(nv(Var "z_83_1"), Var "z_79_2"))),
+  interp(Var "x", cons(nv(Var "z_73_1"), cons(bv(Var "z_43_1"), Var "z_40_2"))),
+  interp(Var "x", cons(undef(), Var "z_35_2")),
+  interp(Var "x", cons(Var "z_35_1", cons(undef(), Var "z_40_2"))),
+  interp(Var "x", cons(Var "z_35_1", cons(Var "z_40_1", cons(Var "z_45_1", Var "z_45_2"))))]
     where interp(x, y) = Appl "interp" [x, y]
           cons(x, y) = Appl "cons" [x, y]
           bv(x) = Appl "bv" [x]
@@ -172,7 +162,6 @@ example_sig =
    Decl "z" "Nat" [],
    Decl "true" "Bool" [],
    Decl "false" "Bool" []]
-
 
 main = do
   print (length example_patterns)
