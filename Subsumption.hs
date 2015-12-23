@@ -24,11 +24,39 @@ type FunctionSymbol = String
 type VariableSymbol = String
 type Type = String
 -- should be a Data.Bimpap but I don't want any other dep than base
-type Signature = [(FunctionSymbol, Type)]
+type Signature = [Decl]
+data Decl = Decl { symbol :: FunctionSymbol, range :: Type, domain :: [Type] }
 type Constraints = [(VariableSymbol, Term)]
 
 data Term = Appl { funName :: FunctionSymbol, children :: [Term] }
           | Var { varName :: VariableSymbol }
+
+depth (Var _) = 0
+depth (Appl f []) = 1
+depth (Appl f ts) = 1 + maximum (map depth ts)
+
+matches :: Term -> Term -> Bool
+matches (Appl f ts) (Appl g us) = f == g && and (zipWith matches ts us)
+matches (Var _) _ = True
+matches _ _ = False
+
+hasRange ty (Decl _ ty' _) = ty == ty'
+
+closedTerms :: Signature -> Type -> Int -> [Term]
+closedTerms sig ty n = closedTerms' n ty
+  where closedTerms' 0 ty = [Appl f [] | Decl f _ [] <- filter (hasRange ty) sig]
+        closedTerms' n ty = do
+          Decl f _ tys <- filter (hasRange ty) sig
+          ts <- sequence (map (closedTerms' (n-1)) tys)
+          return (Appl f ts)
+
+covers :: Signature -> [Term] -> Bool
+covers sig ps | all isVar ps = True
+              | otherwise = all matchesOnePattern closedTermOfMaxDepth
+  where typeOfTs = typeOf sig (funName (head (filter isAppl ps)))
+        maxDepth = maximum (map depth ps)
+        closedTermOfMaxDepth = closedTerms sig typeOfTs maxDepth
+        matchesOnePattern closedTerm = or [matches p closedTerm | p <- ps]
 
 instance Show Term where
   show (Appl f ts) = f ++ "(" ++ intercalate ", " (map show ts) ++ ")"
@@ -46,10 +74,10 @@ isAppl (Appl _ _) = True
 isAppl _ = False
 
 functionsOfType :: Signature -> Type -> [FunctionSymbol]
-functionsOfType sig ty = map fst (filter ((== ty) . snd) sig)
+functionsOfType sig ty = map symbol (filter ((== ty) . range) sig)
 
 typeOf :: Signature -> FunctionSymbol -> Type
-typeOf sig funName = snd (head (filter ((== funName) . fst) sig))
+typeOf sig funName = range (head (filter ((== funName) . symbol) sig))
 
 -- groupChildren [f(t1, t2, t3), f(u1, u2, u3), ...] = [[t1, u1, ...], [t2, u2, ...], [t3, u3, ...]]
 groupChildren :: [Term] -> [[Term]]
@@ -58,14 +86,6 @@ groupChildren ts = transpose (map children ts)
 groupByKey :: Ord k => (a -> k) -> [a] -> [[a]]
 groupByKey key xs = M.elems (M.fromListWith (++) (map makeEntry xs))
   where makeEntry x = (key x, [x])
-
-covers :: Signature -> [Term] -> Bool
---covers _ ts | trace ("covers " ++ show ts) False = undefined
-covers sig [] = False
-covers sig ts = any isVar ts || (sameSet universe (map funName ts) && all childrenCoverSig (groupByKey funName ts))
-  where childrenCoverSig ts = all (covers sig) (groupChildren ts)
-        universe = functionsOfType sig typeOfTs
-        typeOfTs = typeOf sig (funName (head (filter isAppl ts)))
 
 match :: Term -> Term -> Maybe Constraints
 match (Appl f ts) (Appl g us) | f == g    = combine (zipWith match ts us)
@@ -82,6 +102,15 @@ subsumes :: Signature -> [Term] -> Term -> Bool
 subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
   where subsumes' [] = False
         subsumes' css = solvable sig (concat css)
+
+{-
+semantics :: Int -> Term -> S.Set [Term]
+semantics d p = 
+
+naiveSubsumes :: Signature -> [Term] -> Term -> Bool
+naiveSubsumes sig ps p = semantics d p `S.isSubsetOf` S.unions (map (semantics d) ps)
+  where d = maximum (map depth (p:ps))
+-}
 
 minimize sig ps = minimize' ps []
   where minimize' [] kernel = kernel
@@ -133,13 +162,17 @@ example_patterns = [
           z() = Appl "z" []
           nil() = Appl "nil" []
 
-example_sig = [("cons", "List"),
-               ("nil", "List"),
-               ("bv", "Val"),
-               ("nv", "Val"),
-               ("undef", "Val"),
-               ("s", "Nat"),
-               ("z", "Nat")]
+example_sig =
+  [Decl "cons" "List" ["Val", "List"],
+   Decl "nil" "List" [],
+   Decl "bv" "Val" ["Bool"],
+   Decl "nv" "Val" ["Nat"],
+   Decl "undef" "Val" [],
+   Decl "s" "Nat" ["Nat"],
+   Decl "z" "Nat" [],
+   Decl "true" "Bool" [],
+   Decl "false" "Bool" []]
+
 
 main = do
   print (length example_patterns)
