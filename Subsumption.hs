@@ -20,6 +20,7 @@ import Debug.Trace
 import Data.List
 import Data.Maybe
 import Data.Function
+import Control.Applicative
 import qualified Data.Set as S
 import qualified Data.Map as M
 
@@ -32,6 +33,7 @@ type Constraints = [(VariableSymbol, Term)]
 
 data Term = Appl { funName :: FunctionSymbol, children :: [Term] }
           | Var { varName :: VariableSymbol }
+ deriving (Eq, Ord)
 
 depth (Var _) = 0
 depth (Appl f []) = 1
@@ -63,7 +65,7 @@ covers sig ps | any isVar ps = True
 
 instance Show Term where
   show (Appl f ts) = f ++ "(" ++ intercalate ", " (map show ts) ++ ")"
-  show (Var x) = "V"++ x
+  show (Var x) = x
 
 sameSet :: [FunctionSymbol] -> [FunctionSymbol] -> Bool
 sameSet fs1 fs2 = S.fromList fs1 == S.fromList fs2
@@ -116,6 +118,22 @@ minimize sig ps = minimize' ps []
               else minimize' ps (p:kernel)
 
         shortest xs ys = if length xs <= length ys then xs else ys
+
+semantics :: Signature -> Int -> Type -> Term -> S.Set Term
+semantics sig d ty p = S.fromList $ filter (matches p) (closedTerms sig ty d)
+
+subsumesModel :: Signature -> [Term] -> Term -> Bool
+subsumesModel sig [] p = False
+subsumesModel sig ps p | all isVar ps = True
+                       | otherwise = sem p `S.isSubsetOf` (S.unions (map sem ps))
+  where sem = semantics sig dept ty
+        ty = typeOf sig (funName (head (filter isAppl ps)))
+        dept = maximum (map depth (p:ps))
+
+linear p = S.size (S.fromList vars) == length vars
+  where vars = vars' p
+        vars' (Appl f ts) = concat (map vars' ts)
+        vars' (Var x) = [x]
 
 example_patterns = [
   interp(s(s(s(s(s(s(s(Var "z_33_1"))))))), Var "y"),
@@ -171,17 +189,32 @@ example_sig =
    Decl "false" "Bool" []]
 
 instance Monad m => Serial m Term where
-  series = cons1 Var \/ cons1 (\x -> s(x)) \/ cons0 (z())
+  --series = cons1 Var \/ cons1 (\x -> s(x)) \/ cons0 (z())
+  series = varSeries \/ (decDepth $ (\x y -> cons(x, y)) <$> valSeries <~> series) \/ cons0 (nil())
+    where valSeries = varSeries \/ (decDepth $ (\x -> nv(x)) <$> natSeries) \/ cons0 (undef())
+          natSeries = varSeries \/ (decDepth $ (\x -> s(x)) <$> natSeries) \/ cons0 (z())
+          varSeries = cons0 (Var "x1") \/ cons0 (Var "x2") \/ cons0 (Var "x3")
 
-property ps p = subsumes example_sig ps p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
+erase (Appl f ts) = (Appl f (map erase ts))
+erase (Var x) = Var "_"
 
-main_ = smallCheck 4 property
+--property ps p = subsumes example_sig ps p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
+--property ps p = (all linear ps && linear p) ==> (subsumes example_sig ps p == subsumesModel example_sig ps p)
+property ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsResult (map (minimize example_sig) (permutations ps))
+  where result = minimize example_sig ps
+        sameAsResult r = S.fromList (map erase r) == S.fromList (map erase result)
+
+main = smallCheck 5 property
+main___ = do
+  print (minimize example_sig [nil(), cons(undef(), Var "x1")])
+  print (minimize example_sig [cons(undef(), Var "x1"), nil()])
+
 
 main__ = print (subsumes example_sig example_patterns t)
   where t = interp(s(s(z())), cons(bv(Var "z_38_1"), Var "z_35_2"))
 
 
-main = do
+main_ = do
   print (length example_patterns)
   let res = (minimize example_sig example_patterns)
   print (length res)
