@@ -120,7 +120,7 @@ subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
 minimize sig ps = minimize' ps []
   where minimize' [] kernel = kernel
         minimize' (p:ps) kernel =
-           if subsumes sig (ps++kernel) p
+           if subsumesModel sig (ps++kernel) p
               then shortest (minimize' ps (p:kernel)) (minimize' ps kernel)
               else minimize' ps (p:kernel)
 
@@ -133,8 +133,9 @@ myHead s [] = error s
 myHead _ (x:xs) = x
 
 subsumesModel :: Signature -> [Term] -> Term -> Bool
+subsumesModel _ ps p | trace ("subsumesModel " ++ show ps ++ " " ++ show p) False = undefined
 subsumesModel sig [] p = False
-subsumesModel sig ps p | all isVar ps = True
+subsumesModel sig ps p | any isVar ps = True
                        | otherwise = sem p `S.isSubsetOf` (S.unions (map sem ps))
   where sem = semantics sig dept ty
         ty = typeOf sig (funName (myHead "subsumesModel" (filter isAppl ps)))
@@ -241,7 +242,12 @@ property3 ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsR
         sameAsResult r = S.fromList (map erase r) == S.fromList (map erase result)
 -}
 
-main = F.featCheck 14 (F.funcurry property)
+property4 ps p qs = subsumes example_sig ps p `implies` subsumes example_sig (ps++qs) p
+  where implies a b = not a || b
+
+main0 = F.featCheck 14 (F.funcurry property)
+
+main01 = F.featCheck 15 (F.funcurry (F.funcurry property4))
 
 main1 = LSC.depthCheck 4 property2
 main2 = do
@@ -253,7 +259,7 @@ main3 = print (subsumes example_sig example_patterns t)
   where t = interp(s(s(z())), cons(bv(Var "z_38_1"), Var "z_35_2"))
 
 
-main4 = do
+main = do
   print (length example_patterns)
   let res = (minimize example_sig example_patterns)
   print (length res)
