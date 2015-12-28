@@ -12,15 +12,19 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, DeriveDataTypeable, DeriveGeneric #-}
 
 --import Test.SmallCheck.Series
+import qualified Test.Feat as F
+import qualified Test.Feat.Enumerate as F
 import qualified Test.LazySmallCheck as LSC
---import Test.QuickCheck as QC
+import qualified Test.QuickCheck as QC
 import Debug.Trace
 import Data.List
 import Data.Maybe
 import Data.Function
+import Data.Typeable (Typeable)
+import GHC.Generics
 import Control.Applicative
 import qualified Data.Set as S
 import qualified Data.Map as M
@@ -34,7 +38,7 @@ type Constraints = M.Map VariableSymbol (S.Set Term)
 
 data Term = Appl { funName :: FunctionSymbol, children :: [Term] }
           | Var { varName :: VariableSymbol }
- deriving (Eq, Ord)
+ deriving (Eq, Ord, Typeable, Generic)
 
 depth (Var _) = 0
 depth (Appl f []) = 1
@@ -201,20 +205,45 @@ instance LSC.Serial Term where
           natSeries = (LSC.cons s LSC.>< natSeries) LSC.\/ LSC.cons0 (z()) LSC.\/ varSeries
           varSeries = LSC.cons0 (Var "x1") LSC.\/ LSC.cons0 (Var "x2") LSC.\/ LSC.cons0 (Var "x3")
 
+instance F.Enumerable Term where
+  enumerate = linearize <$> enumerateInterp
+    where enumerateVar = pure (Var "_")
+          enumerateInterp = F.consts [curry interp <$> enumerateNat <*> enumerateList, enumerateVar]
+          enumerateList = F.consts [curry cons <$> enumerateVal <*> F.noOptim enumerateList, pure (nil()), enumerateVar]
+          enumerateVal = F.consts [nv <$> enumerateNat, bv <$> enumerateVar, pure (undef()), enumerateVar]
+          enumerateNat = F.consts [s <$> F.noOptim enumerateNat, pure (z()), enumerateVar]
+
+          linearize t = linearize' [0] t
+            where linearize' path (Var _) = Var ("x" ++ concat (map show path))
+                  linearize' path (Appl f ts) = Appl f (zipWith go [0..] ts)
+                    where go n t = linearize' (n:path) t
+
+instance QC.Arbitrary Term where
+  arbitrary = QC.sized F.uniform
+  shrink = QC.genericShrink
+
 erase (Appl f ts) = (Appl f (map erase ts))
 erase (Var x) = Var "_"
 
 hasVars (Appl _ ts) = any hasVars ts
 hasVars (Var _) = True
 
---property ps p = subsumes example_sig ps p && all linear ps && linear p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
-property ps p = (LSC.lift (linear p) LSC.*&* parAll (map (LSC.lift . linear) ps) LSC.*&* LSC.lift (hasVars p) LSC.*&* LSC.lift (not (null ps)) LSC.*&* LSC.lift (any ((>= depth p) . depth) ps)) LSC.*=>* LSC.lift (subsumesModel example_sig ps p == subsumes example_sig ps p)
---property ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsResult (map (minimize example_sig) (permutations ps))
+property ps p = subsumesModel example_sig ps p == subsumes example_sig ps p
+
+--property1 ps p = subsumes example_sig ps p && all linear ps && linear p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
+
+property2 ps p = (LSC.lift (linear p) LSC.*&* parAll (map (LSC.lift . linear) ps) LSC.*&* LSC.lift (hasVars p) LSC.*&* LSC.lift (not (null ps)) LSC.*&* LSC.lift (any ((>= depth p) . depth) ps)) LSC.*=>* LSC.lift (subsumesModel example_sig ps p == subsumes example_sig ps p)
+  where parAll = foldr (LSC.*&*) (LSC.lift True)
+
+{-
+property3 ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsResult (map (minimize example_sig) (permutations ps))
   where result = minimize example_sig ps
         sameAsResult r = S.fromList (map erase r) == S.fromList (map erase result)
-        parAll = foldr (LSC.*&*) (LSC.lift True)
+-}
 
-main = LSC.depthCheck 4 property
+main = F.featCheck 14 (F.funcurry property)
+
+main1 = LSC.depthCheck 4 property2
 main2 = do
   print (minimize example_sig [nil(), cons(undef(), Var "x1")])
   print (minimize example_sig [cons(undef(), Var "x1"), nil()])
