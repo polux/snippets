@@ -14,8 +14,10 @@
 
 {-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 
-import Test.SmallCheck.Series
-import Test.SmallCheck
+--import Test.SmallCheck.Series
+import Test.LazySmallCheck hiding (cons)
+import qualified Test.LazySmallCheck as LSC
+--import Test.QuickCheck as QC
 import Debug.Trace
 import Data.List
 import Data.Maybe
@@ -29,7 +31,7 @@ type VariableSymbol = String
 type Type = String
 type Signature = [Decl]
 data Decl = Decl { symbol :: FunctionSymbol, range :: Type, domain :: [Type] }
-type Constraints = [(VariableSymbol, Term)]
+type Constraints = M.Map VariableSymbol (S.Set Term)
 
 data Term = Appl { funName :: FunctionSymbol, children :: [Term] }
           | Var { varName :: VariableSymbol }
@@ -58,7 +60,7 @@ covers :: Signature -> [Term] -> Bool
 covers _ ps | trace ("covers " ++ show ps) False = undefined
 covers sig ps | any isVar ps = True
               | otherwise = all matchesOnePattern closedTermOfMaxDepth
-  where typeOfTs = typeOf sig (funName (head (filter isAppl ps)))
+  where typeOfTs = typeOf sig (funName (myHead "covers" (filter isAppl ps)))
         maxDepth = maximum (map depth ps)
         closedTermOfMaxDepth = closedTerms sig typeOfTs maxDepth
         matchesOnePattern closedTerm = or [matches p closedTerm | p <- ps]
@@ -82,7 +84,7 @@ functionsOfType :: Signature -> Type -> [FunctionSymbol]
 functionsOfType sig ty = map symbol (filter ((== ty) . range) sig)
 
 typeOf :: Signature -> FunctionSymbol -> Type
-typeOf sig funName = range (head (filter ((== funName) . symbol) sig))
+typeOf sig funName = range (myHead ("typeOf " ++ funName) (filter ((== funName) . symbol) sig))
 
 -- groupChildren [f(t1, t2, t3), f(u1, u2, u3), ...] = [[t1, u1, ...], [t2, u2, ...], [t3, u3, ...]]
 groupChildren :: [Term] -> [[Term]]
@@ -95,20 +97,22 @@ groupByKey key xs = M.elems (M.fromListWith (++) (map makeEntry xs))
 match :: Term -> Term -> Maybe Constraints
 match (Appl f ts) (Appl g us) | f == g    = combine (zipWith match ts us)
                               | otherwise = Nothing
-  where combine mcs = fmap concat (sequence mcs)
-match (Var x) t = Just []
-match t (Var x) = Just [(x, t)]
+  where combine mcs = fmap (M.unionsWith S.union) (sequence mcs)
+match (Var x) t = Just M.empty
+match t (Var x) = Just (M.singleton x (S.singleton t))
 
 solvable :: Signature -> Constraints -> Bool
-solvable sig cs = all (covers sig) groups
-  where groups = map (map snd) (groupByKey fst cs)
+solvable sig cs = all (covers sig . S.toList) (M.elems cs)
+
+traceShowId x = traceShow x x
 
 subsumes :: Signature -> [Term] -> Term -> Bool
+subsumes _ ps p | trace ("subsumes " ++ show ps ++ " " ++ show p) False = undefined
 subsumes sig [] p = False
 subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
   where subsumes' [] = False
-        subsumes' css | any null css = True
-                      | otherwise = solvable sig (concat css)
+        subsumes' css | any M.null css = True
+                      | otherwise = solvable sig (M.unionsWith S.union css)
 
 minimize sig ps = minimize' ps []
   where minimize' [] kernel = kernel
@@ -122,12 +126,15 @@ minimize sig ps = minimize' ps []
 semantics :: Signature -> Int -> Type -> Term -> S.Set Term
 semantics sig d ty p = S.fromList $ filter (matches p) (closedTerms sig ty d)
 
+myHead s [] = error s
+myHead _ (x:xs) = x
+
 subsumesModel :: Signature -> [Term] -> Term -> Bool
 subsumesModel sig [] p = False
 subsumesModel sig ps p | all isVar ps = True
                        | otherwise = sem p `S.isSubsetOf` (S.unions (map sem ps))
   where sem = semantics sig dept ty
-        ty = typeOf sig (funName (head (filter isAppl ps)))
+        ty = typeOf sig (funName (myHead "subsumesModel" (filter isAppl ps)))
         dept = maximum (map depth (p:ps))
 
 linear p = S.size (S.fromList vars) == length vars
@@ -186,38 +193,327 @@ example_sig =
    Decl "s" "Nat" ["Nat"],
    Decl "z" "Nat" [],
    Decl "true" "Bool" [],
-   Decl "false" "Bool" []]
+   Decl "false" "Bool" [],
+   Decl "interp" "Result" ["Nat", "List"]]
 
-instance Monad m => Serial m Term where
-  --series = cons1 Var \/ cons1 (\x -> s(x)) \/ cons0 (z())
-  series = varSeries \/ (decDepth $ (\x y -> cons(x, y)) <$> valSeries <~> series) \/ cons0 (nil())
-    where valSeries = varSeries \/ (decDepth $ (\x -> nv(x)) <$> natSeries) \/ cons0 (undef())
-          natSeries = varSeries \/ (decDepth $ (\x -> s(x)) <$> natSeries) \/ cons0 (z())
+instance Serial Term where
+  series = (LSC.cons (curry cons) >< valSeries >< series) \/ cons0 (nil()) \/ varSeries
+    where valSeries = (LSC.cons nv >< natSeries) \/ cons0 (undef()) \/ varSeries
+          natSeries = (LSC.cons s >< natSeries) \/ cons0 (z()) \/ varSeries
           varSeries = cons0 (Var "x1") \/ cons0 (Var "x2") \/ cons0 (Var "x3")
 
 erase (Appl f ts) = (Appl f (map erase ts))
 erase (Var x) = Var "_"
 
---property ps p = subsumes example_sig ps p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
---property ps p = (all linear ps && linear p) ==> (subsumes example_sig ps p == subsumesModel example_sig ps p)
-property ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsResult (map (minimize example_sig) (permutations ps))
+hasVars (Appl _ ts) = any hasVars ts
+hasVars (Var _) = True
+
+--property ps p = subsumes example_sig ps p && all linear ps && linear p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
+property ps p = (LSC.lift (linear p) *&* parAll (map (LSC.lift . linear) ps) *&* lift (hasVars p) *&* lift (not (null ps)) *&* lift (any ((>= depth p) . depth) ps)) *=>* lift (subsumesModel example_sig ps p == subsumes example_sig ps p)
+--property ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsResult (map (minimize example_sig) (permutations ps))
   where result = minimize example_sig ps
         sameAsResult r = S.fromList (map erase r) == S.fromList (map erase result)
+        parAll = foldr (*&*) (LSC.lift True)
 
-main = smallCheck 5 property
-main___ = do
+main = depthCheck 4 property
+main2 = do
   print (minimize example_sig [nil(), cons(undef(), Var "x1")])
   print (minimize example_sig [cons(undef(), Var "x1"), nil()])
 
 
-main__ = print (subsumes example_sig example_patterns t)
+main3 = print (subsumes example_sig example_patterns t)
   where t = interp(s(s(z())), cons(bv(Var "z_38_1"), Var "z_35_2"))
 
 
-main_ = do
+main4 = do
   print (length example_patterns)
   let res = (minimize example_sig example_patterns)
   print (length res)
   putStrLn (unlines (map show res))
 
---main = putStrLn $ unlines $ map show $ (closedTerms example_sig "List" 2)
+
+main5 = print (subsumes example_sig (example_patterns \\ [t]) t)
+  where t = interp(s(s(z())), cons(Var "z_35_1", cons(bv(Var "z_43_1"), Var "z_40_2")))
+
+main6 = putStrLn $ unlines $ map show $ (closedTerms example_sig "List" 2)
+
+main7 = do
+  print (length ex_2)
+  let res = (minimize sig_2 ex_2)
+  print (length res)
+
+
+ex_3 = [
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(neg(Var "z_94_1"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(bound(Var "z_97_1"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(neg(Var "z_94_1"), c(Var "z_75_1")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(add(Var "z_29_1", Var "z_29_2"), Var "z_23_2")),
+  numadd(add(neg(Var "z_46_1"), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(bound(Var "z_97_1"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(mul(Var "z_26_1", sub(Var "z_36_1", Var "z_36_2")), Var "z_23_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(sub(Var "z_30_1", Var "z_30_2"), Var "z_23_2")),
+  numadd(c(Var "z_93_1"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(mul(Var "z_26_1", c(Var "z_33_1")), Var "z_23_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), neg(Var "z_76_1")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(sub(Var "z_42_1", Var "z_42_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(c(Var "z_93_1"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), neg(Var "z_76_1")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(c(Var "z_93_1"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(bound(Var "z_43_1"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), c(Var "z_75_1")),
+  numadd(bound(Var "z_97_1"), bound(Var "z_79_1")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(neg(Var "z_94_1"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(add(Var "z_47_1", Var "z_47_2"), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), bound(Var "z_79_1")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), bound(Var "z_79_1")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), bound(Var "z_25_1")),
+  numadd(bound(Var "z_97_1"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(c(Var "b1"), c(Var "b2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(c(Var "z_93_1"), neg(Var "z_76_1")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(bound(Var "z_97_1"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "z_44_1", mul(Var "z_50_1", Var "z_50_2")), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(neg(Var "z_94_1"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(c(Var "z_39_1"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(neg(Var "z_28_1"), Var "z_23_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(c(Var "z_93_1"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(bound(Var "z_49_1"), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), mul(Var "z_20_1", Var "z_20_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(mul(Var "z_26_1", neg(Var "z_34_1")), Var "z_23_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(neg(Var "z_40_1"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(sub(Var "z_48_1", Var "z_48_2"), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(bound(Var "z_97_1"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(mul(Var "z_38_1", Var "z_38_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(neg(Var "z_94_1"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(mul(Var "z_26_1", mul(Var "z_32_1", Var "z_32_2")), Var "z_23_2")),
+  numadd(neg(Var "z_94_1"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(c(Var "z_45_1"), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), sub(Var "z_24_1", Var "z_24_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), c(Var "z_75_1")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(bound(Var "z_31_1"), Var "z_23_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), c(Var "z_75_1")),
+  numadd(neg(Var "z_94_1"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), neg(Var "z_76_1")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(c(Var "z_93_1"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(c(Var "z_27_1"), Var "z_23_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), neg(Var "z_22_1")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), c(Var "z_21_1")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), c(Var "z_75_1")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", neg(Var "z_106_1")), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), neg(Var "z_76_1")),
+  numadd(add(mul(Var "z_44_1", c(Var "z_51_1")), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(mul(Var "z_92_1", Var "z_92_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_44_1", neg(Var "z_52_1")), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), mul(Var "z_74_1", Var "z_74_2")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(sub(Var "z_102_1", Var "z_102_2"), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(sub(Var "z_84_1", Var "z_84_2"), Var "z_77_2")),
+  numadd(add(c(Var "z_99_1"), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(add(Var "z_101_1", Var "z_101_2"), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(bound(Var "z_97_1"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(neg(Var "z_94_1"), bound(Var "z_79_1")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(bound(Var "z_85_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(mul(Var "z_80_1", sub(Var "z_90_1", Var "z_90_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), add(mul(Var "z_80_1", add(Var "z_89_1", Var "z_89_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", sub(Var "z_108_1", Var "z_108_2")), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(mul(Var "z_80_1", neg(Var "z_88_1")), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(neg(Var "z_82_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_44_1", sub(Var "z_54_1", Var "z_54_2")), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(mul(Var "z_44_1", add(Var "z_53_1", Var "z_53_2")), Var "z_41_2"), add(mul(Var "c2", bound(Var "n2")), Var "r2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), bound(Var "z_79_1")),
+  numadd(add(mul(Var "z_98_1", add(Var "z_107_1", Var "z_107_2")), Var "z_95_2"), add(add(Var "z_83_1", Var "z_83_2"), Var "z_77_2")),
+  numadd(sub(Var "z_96_1", Var "z_96_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), sub(Var "z_78_1", Var "z_78_2")),
+  numadd(add(mul(Var "c1", bound(Var "n1")), Var "r1"), add(mul(Var "z_26_1", add(Var "z_35_1", Var "z_35_2")), Var "z_23_2")),
+  numadd(add(mul(Var "z_98_1", c(Var "z_105_1")), Var "z_95_2"), add(c(Var "z_81_1"), Var "z_77_2")),
+  numadd(add(mul(Var "z_98_1", mul(Var "z_104_1", Var "z_104_2")), Var "z_95_2"), add(mul(Var "z_80_1", c(Var "z_87_1")), Var "z_77_2")),
+  numadd(c(Var "z_93_1"), add(mul(Var "z_80_1", mul(Var "z_86_1", Var "z_86_2")), Var "z_77_2")),
+  numadd(add(bound(Var "z_103_1"), Var "z_95_2"), neg(Var "z_76_1")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), bound(Var "z_79_1")),
+  numadd(add(neg(Var "z_100_1"), Var "z_95_2"), c(Var "z_75_1"))]
+    where numadd(x,y) = Appl "numadd" [x,y]
+          c(x) = Appl "c" [x]
+          bound(x) = Appl "bound" [x]
+          neg(x) = Appl "neg" [x]
+          add(x, y) = Appl "add" [x, y]
+          sub(x, y) = Appl "sub" [x, y]
+          mul(x, y) = Appl "mul" [x, y]
+
+sig_2 = [
+  Decl "c" "T" ["Nat"],
+  Decl "bound" "T" ["Nat"],
+  Decl "neg" "T" ["T"],
+  Decl "add" "T" ["T", "T"],
+  Decl "sub" "T" ["T", "T"],
+  Decl "mul" "T" ["T", "T"],
+  Decl "s" "Nat" ["Nat"],
+  Decl "z" "Nat" []]
