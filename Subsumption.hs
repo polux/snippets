@@ -24,6 +24,7 @@ import Data.List
 import Data.Maybe
 import Data.Function
 import Data.Typeable (Typeable)
+import Data.MemoTrie
 import GHC.Generics
 import Control.Applicative
 import qualified Data.Set as S
@@ -50,6 +51,12 @@ matches (Var _) _ = True
 matches _ _ = False
 
 hasRange ty (Decl _ ty' _) = ty == ty'
+
+instance HasTrie Decl where
+  newtype (Decl :->: b) = DeclTrie { unDeclTrie :: Reg Decl :->: b }
+  trie = trieGeneric DeclTrie
+  untrie = untrieGeneric unDeclTrie
+  enumerate = enumerateGeneric unDeclTrie
 
 closedTerms :: Signature -> Type -> Int -> [Term]
 closedTerms sig ty n = closedTerms' n ty
