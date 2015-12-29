@@ -12,7 +12,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, DeriveDataTypeable, DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, DeriveDataTypeable, DeriveGeneric, TypeOperators, TypeFamilies #-}
 
 --import Test.SmallCheck.Series
 import qualified Test.Feat as F
@@ -53,10 +53,13 @@ matches _ _ = False
 hasRange ty (Decl _ ty' _) = ty == ty'
 
 instance HasTrie Decl where
-  newtype (Decl :->: b) = DeclTrie { unDeclTrie :: Reg Decl :->: b }
-  trie = trieGeneric DeclTrie
-  untrie = untrieGeneric unDeclTrie
-  enumerate = enumerateGeneric unDeclTrie
+  newtype (Decl :->: b) = DeclTrie ((FunctionSymbol, Type, [Type]) :->: b)
+  trie f = DeclTrie (trie (f . decl))
+  untrie (DeclTrie t) = untrie t . undecl
+  enumerate (DeclTrie t) = [(decl x, y) | (x, y) <- enumerate t]
+
+decl (x, y, z) = Decl x y z
+undecl (Decl x y z) = (x, y, z)
 
 closedTerms :: Signature -> Type -> Int -> [Term]
 closedTerms sig ty n = closedTerms' n ty
