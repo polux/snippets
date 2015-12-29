@@ -62,11 +62,11 @@ decl (x, y, z) = Decl x y z
 undecl (Decl x y z) = (x, y, z)
 
 closedTerms :: Signature -> Type -> Int -> [Term]
-closedTerms sig ty n = closedTerms' n ty
-  where closedTerms' 0 ty = [Appl f [] | Decl f _ [] <- filter (hasRange ty) sig]
-        closedTerms' n ty = do
+closedTerms = memo3 closedTerms'
+  where closedTerms' sig ty 0 = [Appl f [] | Decl f _ [] <- filter (hasRange ty) sig]
+        closedTerms' sig ty n = do
           Decl f _ tys <- filter (hasRange ty) sig
-          ts <- sequence (map (closedTerms' (n-1)) tys)
+          ts <- sequence (map (\ty -> closedTerms sig ty (n-1)) tys)
           return (Appl f ts)
 
 covers :: Signature -> [Term] -> Bool
