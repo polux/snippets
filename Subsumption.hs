@@ -70,8 +70,9 @@ closedTerms = memo3 closedTerms'
           return (Appl f ts)
 
 covers :: Signature -> [Term] -> Bool
-covers _ ps | trace ("covers " ++ show ps) False = undefined
+--covers _ ps | trace ("covers " ++ show ps) False = undefined
 covers sig ps | any isVar ps = True
+              | {- optim -} not (S.fromList [f | Appl f _ <- ps] == S.fromList (functionsOfType sig typeOfTs)) = False
               | otherwise = all matchesOnePattern closedTermOfMaxDepth
   where typeOfTs = typeOf sig (funName (myHead "covers" (filter isAppl ps)))
         maxDepth = maximum (map depth ps)
@@ -120,7 +121,7 @@ solvable sig cs = all (covers sig . S.toList) (M.elems cs)
 traceShowId x = traceShow x x
 
 subsumes :: Signature -> [Term] -> Term -> Bool
-subsumes _ ps p | trace ("subsumes " ++ show ps ++ " " ++ show p) False = undefined
+--subsumes _ ps p | trace ("subsumes " ++ show ps ++ " " ++ show p) False = undefined
 subsumes sig [] p = False
 subsumes sig ps p = subsumes' (catMaybes [match q p | q <- ps])
   where subsumes' [] = False
@@ -143,8 +144,7 @@ myHead s [] = error s
 myHead _ (x:xs) = x
 
 subsumesModel :: Signature -> [Term] -> Term -> Bool
-subsumesModel _ ps p | trace ("subsumesModel " ++ show ps ++ " " ++ show p) False = undefined
-subsumesModel sig [] p = False
+--subsumesModel _ ps p | trace ("subsumesModel " ++ show ps ++ " " ++ show p) False = undefined
 subsumesModel sig ps p | any isVar ps = True
                        | otherwise = sem p `S.isSubsetOf` (S.unions (map sem ps))
   where sem = semantics sig dept ty
@@ -210,6 +210,16 @@ example_sig =
    Decl "false" "Bool" [],
    Decl "interp" "Result" ["Nat", "List"]]
 
+test_sig =
+  [ Decl "fork" "Tree" ["Tree", "Tree"]
+  , Decl "tip" "Tree" []
+  ]
+
+-- counter example [fork(tip(), tip()), fork(tip(), x10), fork(fork(x000, x100), x10)] fork(x00, x10)
+
+fork l r = Appl "fork" [l, r]
+tip = Appl "tip" []
+
 instance LSC.Serial Term where
   series = (LSC.cons (curry cons) LSC.>< valSeries LSC.>< LSC.series) LSC.\/ LSC.cons0 (nil()) LSC.\/ varSeries
     where valSeries = (LSC.cons nv LSC.>< natSeries) LSC.\/ LSC.cons0 (undef()) LSC.\/ varSeries
@@ -217,12 +227,18 @@ instance LSC.Serial Term where
           varSeries = LSC.cons0 (Var "x1") LSC.\/ LSC.cons0 (Var "x2") LSC.\/ LSC.cons0 (Var "x3")
 
 instance F.Enumerable Term where
-  enumerate = linearize <$> enumerateInterp
+  enumerate = linearize <$> enumerateTree --enumerateInterp
     where enumerateVar = pure (Var "_")
           enumerateInterp = F.consts [curry interp <$> enumerateNat <*> enumerateList, enumerateVar]
           enumerateList = F.consts [curry cons <$> enumerateVal <*> F.noOptim enumerateList, pure (nil()), enumerateVar]
           enumerateVal = F.consts [nv <$> enumerateNat, bv <$> enumerateVar, pure (undef()), enumerateVar]
           enumerateNat = F.consts [s <$> F.noOptim enumerateNat, pure (z()), enumerateVar]
+
+          enumerateTree = F.consts [ fork <$> enumerateTree' <*> enumerateTree' ]
+
+          enumerateTree' = F.consts [ fork <$> F.noOptim enumerateTree' <*> F.noOptim enumerateTree'
+                                    , pure tip
+                                    , enumerateVar]
 
           linearize t = linearize' [0] t
             where linearize' path (Var _) = Var ("x" ++ concat (map show path))
@@ -239,7 +255,14 @@ erase (Var x) = Var "_"
 hasVars (Appl _ ts) = any hasVars ts
 hasVars (Var _) = True
 
-property ps p = subsumesModel example_sig ps p == subsumes example_sig ps p
+data Input = Input [Term] Term
+  deriving (Typeable, Show)
+
+instance F.Enumerable Input where
+  enumerate = Input <$> ts <*> F.enumerate
+    where ts = (\x y z  -> (x:y:z:[])) <$> F.enumerate <*> F.enumerate <*> F.enumerate -- <*> F.enumerate
+
+property (Input ps p) = subsumesModel test_sig ps p == subsumes test_sig ps p
 
 --property1 ps p = subsumes example_sig ps p && all linear ps && linear p ==> forAll $ \qs -> subsumes example_sig (ps++qs) p
 
@@ -255,9 +278,19 @@ property3 ps = (length ps > 1 && all linear ps && all isAppl ps) ==> all sameAsR
 property4 ps p qs = subsumes example_sig ps p `implies` subsumes example_sig (ps++qs) p
   where implies a b = not a || b
 
-main0 = F.featCheck 14 (F.funcurry property)
+main0 = F.featCheck 18 property
 
 main01 = F.featCheck 15 (F.funcurry (F.funcurry property4))
+
+main = do
+  print (subsumes test_sig ps p)
+  print (subsumesModel test_sig ps p)
+  where ps = [fork tip tip, fork tip x10, fork (fork x000 x100) x10]
+        p = fork x00 x10
+        x00 = Var "x00"
+        x10 = Var "x10"
+        x000 = Var "x000"
+        x100 = Var "x100"
 
 main1 = LSC.depthCheck 4 property2
 main2 = do
@@ -269,7 +302,7 @@ main3 = print (subsumes example_sig example_patterns t)
   where t = interp(s(s(z())), cons(bv(Var "z_38_1"), Var "z_35_2"))
 
 
-main = do
+main4 = do
   print (length example_patterns)
   let res = (minimize example_sig example_patterns)
   print (length res)
