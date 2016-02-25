@@ -15,6 +15,7 @@
 {-# LANGUAGE TemplateHaskell, GADTs, KindSignatures, TypeSynonymInstances, FlexibleInstances #-}
 
 import Data.List
+import qualified Data.Map.Strict as M
 import Control.Monad
 import Control.Monad.Operational
 import Lens.Micro
@@ -36,36 +37,47 @@ data ActorInstruction s m :: * -> * where
 
 type ActorProgram s m a = Program (ActorInstruction s m) a
 
-type Queue m = [Message m]
+type Queues m = M.Map ProcessId [m]
 
 data Actor s m =
   Actor {
-    _actorProgram :: ProgramView (ActorInstruction s m) (),
+    _actorProgram :: ActorProgram s m (),
     _actorState   :: s,
-    _actorQueue   :: Queue m
+    _actorQueues  :: Queues m
   }
 
 makeLenses ''Actor
 
-stepActor :: Actor s m -> (Actor s m, Maybe (Message m))
-stepActor (Actor program state queue) = stepActor' program
-  where stepActor' (GetState :>>= is) = (Actor (view (is state)) state queue, Nothing)
-        stepActor' (SetState x :>>= is) = (Actor (view (is ())) x queue, Nothing)
-        stepActor' (SendMessage pid m :>>= is) = (Actor (view (is ())) state queue, Just (pid, m))
-        stepActor' (WaitForMessage :>>= is) | (m:ms) <- queue = (Actor (view (is m)) state ms, Nothing)
-        stepActor' _ = (Actor program state queue, Nothing)
+enqueue :: ProcessId -> m -> Queues m -> Queues m
+enqueue pid m = M.insertWith (flip (++)) pid [m]
 
-step :: ProcessId -> [Actor s m] -> [Actor s m]
-step pid actors | Just (qid, m) <- message = actors' & ix qid . actorQueue %~ (++[(pid, m)])
-                | otherwise = actors'
-  where (actor', message) = stepActor (actors !! pid)
+dequeue :: ProcessId -> Queues m -> Maybe (m, Queues m)
+dequeue pid queues
+  | Just (m:ms) <- M.lookup pid queues = Just (m, update ms)
+  | otherwise = Nothing
+  where update [] = M.delete pid queues
+        update ms = M.insert pid ms queues
+
+stepActor :: ProcessId -> Actor s m -> (Actor s m, Maybe (Message m))
+stepActor sid (Actor program state queues) = stepActor' (view program)
+  where stepActor' (GetState :>>= is) = (Actor (is state) state queues, Nothing)
+        stepActor' (SetState x :>>= is) = (Actor (is ()) x queues, Nothing)
+        stepActor' (SendMessage pid m :>>= is) = (Actor (is ()) state queues, Just (pid, m))
+        stepActor' (WaitForMessage :>>= is)
+            | Just (m, queues') <- dequeue sid queues = (Actor (is (sid, m)) state queues', Nothing)
+        stepActor' _ = (Actor program state queues, Nothing)
+
+step :: (ProcessId, ProcessId) -> [Actor s m] -> [Actor s m]
+step (pid, sid) actors | Just (rid, m) <- message = actors' & ix rid . actorQueues %~ enqueue pid m
+                       | otherwise = actors'
+  where (actor', message) = stepActor sid (actors !! pid)
         actors' = actors & ix pid .~ actor'
 
-run :: [ProcessId] -> [Actor s m] -> [[Actor s m]]
+run :: [(ProcessId, ProcessId)] -> [Actor s m] -> [[Actor s m]]
 run pids actors = scanl (flip step) actors pids
 
-simpleRun :: [ProcessId] -> [(ActorProgram s m (), s)] -> [[Actor s m]]
-simpleRun pids pairs = run pids [Actor (view p) s [] | (p, s) <- pairs]
+simpleRun :: [(ProcessId, ProcessId)] -> [(ActorProgram s m (), s)] -> [[Actor s m]]
+simpleRun pids pairs = run pids [Actor p s M.empty | (p, s) <- pairs]
 
 {- Helper Functions for writing ActorPrograms -}
 
@@ -96,16 +108,18 @@ instance (Show s, Show m, Show a) => Show (ProgramView (ActorInstruction s m) a)
   show (Return x) = "return " ++ show x
   show (i :>>= is) = show i ++ "; ..."
 
-pretty :: (Show s, Show m) => [ProcessId] -> [[Actor s m]] -> String
+pretty :: (Show s, Show m) => [(ProcessId, ProcessId)] -> [[Actor s m]] -> String
 pretty pids (t:ts) = unlines (prettyActors t : zipWith prettyStep (pids) ts)
   where prettyStep pid actors = banner ("advance " ++ show pid) ++ "\n\n" ++ prettyActors actors
-        banner x = "==========\n" ++ x ++ "\n=========="
+        banner x = "=============\n" ++ x ++ "\n============="
         prettyActors actors = unlines (zipWith prettyActor [0..] actors)
-        prettyActor pid (Actor program state queue) =
+        prettyActor pid (Actor program state queues) =
           unlines [ "pid " ++ show pid ++ ":"
-                  , "  program: " ++ show program
+                  , "  program: " ++ show (view program)
                   , "  state: " ++ show state
-                  , "  queue: " ++ show queue ]
+                  , "  queues: " ++ prettyQueues (M.toList queues) ]
+        prettyQueues queues = "{" ++ intercalate ", " (map prettyQueue queues) ++ "}"
+        prettyQueue (pid, queue) = show pid ++ ": [" ++ intercalate ", " (map show queue) ++ "]"
 
 {- Example -}
 
@@ -131,12 +145,15 @@ actors = [
   (program 1, State 0 0),
   (program 0, State 0 0)]
 
--- We define an alias for lists of pids that represent execution sequences. It
+-- We define an alias for lists of pairs of pids that represent execution
+-- sequences. (The first element of a pair is the id of the process to advance,
+-- the second element is the process it should receive a message from if such a
+-- message is waiting and the next execution step is to wait for a message.) It
 -- allows us to define custom instances for Arbitrary and Show.
-newtype ExecutionSequence = ExecutionSequence [Int]
+newtype ExecutionSequence = ExecutionSequence [(ProcessId, ProcessId)]
 
 instance Q.Arbitrary ExecutionSequence where
-  arbitrary = ExecutionSequence <$> Q.listOf (Q.elements [0, 1])
+  arbitrary = ExecutionSequence <$> Q.listOf ((,) <$> Q.elements [0, 1] <*> Q.elements [0,1])
   shrink (ExecutionSequence pids) = ExecutionSequence <$> Q.shrink pids
 
 instance Show ExecutionSequence where
