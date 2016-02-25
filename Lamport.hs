@@ -19,6 +19,8 @@ import Control.Monad
 import Control.Monad.Operational
 import Lens.Micro
 import Lens.Micro.TH
+import qualified Test.QuickCheck as Q
+import qualified Test.QuickCheck.Gen as Q
 
 {- Actors Library -}
 
@@ -33,11 +35,6 @@ data ActorInstruction s m :: * -> * where
   WaitForMessage :: ActorInstruction s m (Message m)
 
 type ActorProgram s m a = Program (ActorInstruction s m) a
-
-getState = singleton GetState
-setState s = singleton (SetState s)
-sendMessage pid m = singleton (SendMessage pid m)
-waitForMessage = singleton WaitForMessage
 
 type Queue m = [Message m]
 
@@ -70,6 +67,23 @@ run pids actors = scanl (flip step) actors pids
 simpleRun :: [ProcessId] -> [(ActorProgram s m (), s)] -> [[Actor s m]]
 simpleRun pids pairs = run pids [Actor (view p) s [] | (p, s) <- pairs]
 
+{- Helper Functions for writing ActorPrograms -}
+
+getState = singleton GetState
+setState s = singleton (SetState s)
+sendMessage pid m = singleton (SendMessage pid m)
+waitForMessage = singleton WaitForMessage
+
+modify f = do { s <- getState; setState (f s) }
+get l = do { s <- getState; return (s ^. l) }
+
+infix 4 .=, %=, +=, ++=
+
+l .= x = modify (l .~ x)
+l %= f = modify (l %~ f)
+l += x = l %= (+x)
+l ++= x = l %= (++x)
+
 {- Pretty-Printing -}
 
 instance (Show s, Show m) => Show (ActorInstruction s m a) where
@@ -84,36 +98,65 @@ instance (Show s, Show m, Show a) => Show (ProgramView (ActorInstruction s m) a)
 
 pretty :: (Show s, Show m) => [ProcessId] -> [[Actor s m]] -> String
 pretty pids (t:ts) = unlines (prettyActors t : zipWith prettyStep (pids) ts)
-  where prettyStep pid actors = "==========\nadvance " ++ show pid ++ "\n==========\n\n" ++ prettyActors actors
-        prettyActors actors = intercalate "\n" (zipWith prettyActor [0..] actors)
-        prettyActor pid (Actor program state queue) = unlines [
-           "pid " ++ show pid ++ ":",
-           "  program: " ++ show program,
-           "  state: " ++ show state,
-           "  queue: " ++ show queue]
+  where prettyStep pid actors = banner ("advance " ++ show pid) ++ "\n\n" ++ prettyActors actors
+        banner x = "==========\n" ++ x ++ "\n=========="
+        prettyActors actors = unlines (zipWith prettyActor [0..] actors)
+        prettyActor pid (Actor program state queue) =
+          unlines [ "pid " ++ show pid ++ ":"
+                  , "  program: " ++ show program
+                  , "  state: " ++ show state
+                  , "  queue: " ++ show queue ]
 
 {- Example -}
 
--- The program of a simple actor with a state of type Int that sends and
--- receives messages of type String. Calling getState, setState, sendMessage or
--- waitForMessage potentially yields control back to the scheduler.
-program :: ProcessId -> ActorProgram Int String ()
+data State = State { _counter :: Int, _lastReceived :: Int }
+  deriving Show
+
+makeLenses ''State
+
+-- The program of a simple actor with a state of type State that sends and
+-- receives messages of type Int. Calling getState, setState, sendMessage or
+-- waitForMessage yields control back to the scheduler.
+program :: ProcessId -> ActorProgram State Int ()
 program otherPid = forever $ do
-  counter <- getState
-  sendMessage otherPid ("ping " ++ show counter)
-  (_, _) <- waitForMessage
-  setState (counter + 1)
+  c <- get counter
+  sendMessage otherPid c
+  (_, n) <- waitForMessage
+  lastReceived .= n
+  counter .= c + 1
 
--- Two actors : (program 1) with initial state 0, and (program 0) with initial 0.
-actors = [(program 1, 0), (program 0, 0)]
+-- Two actors : (program 1) with initial state (State 0 0), and (program 0)
+-- with initial state (State 0 0).
+actors = [
+  (program 1, State 0 0),
+  (program 0, State 0 0)]
 
--- The sequence in which we want to execute the actors, in that case:
--- actor 0, then actor 1, then actor 0, then actor 1, ...
-executionSequence = 0:1:executionSequence
+-- We define an alias for lists of pids that represent execution sequences. It
+-- allows us to define custom instances for Arbitrary and Show.
+newtype ExecutionSequence = ExecutionSequence [Int]
 
--- The execution trace: every actor's state at each step of the execution
-trace = simpleRun executionSequence actors
+instance Q.Arbitrary ExecutionSequence where
+  arbitrary = ExecutionSequence <$> Q.listOf (Q.elements [0, 1])
+  shrink (ExecutionSequence pids) = ExecutionSequence <$> Q.shrink pids
 
--- Pretty-print the execution trace
-main = putStrLn (pretty executionSequence trace)
+instance Show ExecutionSequence where
+  show (ExecutionSequence ns) = unlines [show ns, pretty ns (simpleRun ns actors)]
 
+-- A property that holds for all execution sequences: that at any moment every
+-- actor verifies abs(actor.counter - actor.lastReceived) <= 1.
+property1 (ExecutionSequence pids) = all (all property') (simpleRun pids actors)
+  where property' actor = abs (state ^. counter - state ^. lastReceived) <= 1
+          where state = actor ^. actorState
+
+-- A property that doesn't hold for all execution sequences: that at any moment
+-- every actor verifies actor.counter = actor.lastReceived
+property2 (ExecutionSequence pids) = all (all property') (simpleRun pids actors)
+  where property' actor = state ^. counter == state ^. lastReceived
+          where state = actor ^. actorState
+
+-- We use quickcheck to verify both properties. The first property passes 100
+-- tests. A counter-example is found for the second property and is then shrunk
+-- into a minimal counter-example.
+main = do
+  Q.quickCheck property1
+  Q.quickCheck property2
