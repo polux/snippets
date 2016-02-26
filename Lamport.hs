@@ -23,6 +23,7 @@ import Lens.Micro
 import Lens.Micro.TH
 import qualified Test.QuickCheck as Q
 import qualified Test.QuickCheck.Gen as Q
+import Debug.Trace
 
 {- Actors Library -}
 
@@ -109,7 +110,16 @@ instance (Show s, Show m, Show a) => Show (ProgramView (ActorInstruction s m) a)
   show (Return x) = "return " ++ show x
   show (i :>>= is) = show i ++ "; ..."
 
-pretty :: (Show s, Show m) => [(ProcessId, ProcessId)] -> [[Actor s m]] -> String
+class Debuggable a where
+  debug :: ProcessId -> a -> String
+
+-- removes boring steps from the trace
+cleanup :: [(ProcessId, ProcessId)] -> [[Actor s m]] -> ([(ProcessId, ProcessId)], [[Actor s m]])
+cleanup pids steps = let (pids', steps') = unzip (filter keep (zip pids steps)) in (pids', steps' ++ [last steps])
+  where keep ((pid, sid), actors) | (GetState :>>= _) <- view ((actors !! pid) ^. actorProgram) = False
+        keep _ = True
+
+pretty :: (Debuggable s, Show s, Show m) => [(ProcessId, ProcessId)] -> [[Actor s m]] -> String
 pretty pids (t:ts) = unlines (prettyActors t : zipWith prettyStep (pids) ts)
   where prettyStep pid actors = banner ("advance " ++ show pid) ++ "\n\n" ++ prettyActors actors
         banner x = "=============\n" ++ x ++ "\n============="
@@ -118,9 +128,12 @@ pretty pids (t:ts) = unlines (prettyActors t : zipWith prettyStep (pids) ts)
           unlines [ "pid " ++ show pid ++ ":"
                   , "  program: " ++ show (view program)
                   , "  state: " ++ show state
+                  , "  debug: " ++ debug pid state
                   , "  queues: " ++ prettyQueues (M.toList queues) ]
         prettyQueues queues = "{" ++ intercalate ", " (map prettyQueue queues) ++ "}"
         prettyQueue (pid, queue) = show pid ++ ": [" ++ intercalate ", " (map show queue) ++ "]"
+
+prettyClean pids snaphots = uncurry pretty (cleanup pids snaphots)
 
 {- Example -}
 
@@ -136,16 +149,19 @@ data State = State {
 
 makeLenses ''State
 
-addToRequestQueue ts pid =
-  requestQueue %= \queue -> sort ((ts,pid):queue)
+ownsTheResource myPid [] lastSeen = False
+ownsTheResource myPid ((ts, pid):_) lastSeen =
+  pid == myPid && all (> ts) (M.elems lastSeen)
 
-rmFromRequestQueue pid =
-  requestQueue %= filter (\(_, qid) -> qid /= pid)
+instance Debuggable State where
+  debug pid state = "owns = " ++ show (ownsTheResource pid rq lastSeen)
+    where rq = state ^. requestQueue
+          lastSeen = state ^. lastSeenTimestamps
 
-sendMessage' pid m = do
-  clock += 1
-  c <- get clock
-  sendMessage pid (c, m)
+addToRequestQueue ts pid = requestQueue %= insert (ts,pid)
+
+rmFromRequestQueue pid = requestQueue %= filter isNotPid
+  where isNotPid (_, qid) = qid /= pid
 
 waitForMessage' = do
   clock += 1
@@ -154,13 +170,13 @@ waitForMessage' = do
   when (ts > c) (clock .= ts)
   return (ts, m)
 
-ownsTheResource myPid rq lastSeen =
-  not (null rq) &&
-  snd (head rq) == myPid &&
-  all (> fst (head rq)) (M.elems lastSeen)
-
 iOwnTheResource myPid =
   ownsTheResource myPid <$> get requestQueue <*> get lastSeenTimestamps
+
+incrementClock = do
+  c <- get clock
+  clock .= c + 1
+  return (c + 1)
 
 program :: ProcessId -> [ProcessId] -> ActorProgram State (Int, Msg) ()
 program myPid otherPids = forever $ do
@@ -168,30 +184,30 @@ program myPid otherPids = forever $ do
   if iOwn
     then do
       rmFromRequestQueue myPid
+      ts <- incrementClock
       forM_ otherPids $ \pid -> do
-        sendMessage' pid ReleaseResource
+        sendMessage pid (ts, ReleaseResource)
     else do
-      forM_ otherPids $ \pid -> do
-        sendMessage' pid RequestResource
-      ts <- get clock
+      ts <- incrementClock
       addToRequestQueue ts myPid
+      forM_ otherPids $ \pid -> do
+        sendMessage pid (ts, RequestResource)
       whileM_ (not <$> iOwnTheResource myPid) $ do
         (pid, (ots, msg)) <- waitForMessage'
         lastSeenTimestamps %= M.insert pid ots
         case msg of
           RequestResource -> do
             addToRequestQueue ots pid
-            sendMessage' pid Ack
+            ts <- incrementClock
+            sendMessage pid (ts, Ack)
           ReleaseResource -> do
             rmFromRequestQueue pid
           _ -> return ()
 
--- Two actors : (program 1) with initial state (State 0 0), and (program 0)
--- with initial state (State 0 0).
 actors = [
-  (program 0 [1,2], State 0 (M.fromList [(1,-1), (2,-1)]) [(-1,0)]),
-  (program 1 [0,2], State 0 (M.fromList [(0,-1), (2,-1)]) [(-1,0)]),
-  (program 2 [0,1], State 0 (M.fromList [(0,-1), (1,-1)]) [(-1,0)])]
+  (program 0 [1,2], State 0 (M.fromList [(1,-1), (2,-1)]) [(-2,0)]),
+  (program 1 [0,2], State 0 (M.fromList [(0,-1), (2,-1)]) [(-2,0)]),
+  (program 2 [0,1], State 0 (M.fromList [(0,-1), (1,-1)]) [(-2,0)])]
 
 
 -- We define an alias for lists of pairs of pids that represent execution
@@ -202,24 +218,37 @@ actors = [
 newtype ExecutionSequence = ExecutionSequence [(ProcessId, ProcessId)]
 
 instance Q.Arbitrary ExecutionSequence where
-  arbitrary = ExecutionSequence <$> Q.listOf ((,) <$> Q.elements [0, 1, 2] <*> Q.elements [0, 1, 2])
+  arbitrary = ExecutionSequence <$> Q.listOf ((,) <$> pids <*> pids)
+    where pids = Q.elements [0,1,2]
   shrink (ExecutionSequence pids) = ExecutionSequence <$> Q.shrink pids
 
 instance Show ExecutionSequence where
-  show (ExecutionSequence ns) = unlines [show ns, pretty ns (simpleRun ns actors)]
+  show (ExecutionSequence ns) = unlines [show ns, prettyClean ns (simpleRun ns actors)]
 
 
 property1 (ExecutionSequence pids) = all property' (simpleRun pids actors)
   where property' actors = length (filter id (zipWith owns [0..] actors)) <= 1
         owns pid actor = ownsTheResource pid (actor ^. actorState.requestQueue) (actor ^. actorState.lastSeenTimestamps)
 
-{-
-allpids = 0:1:2:allpids
-executionSequence = concatMap (\pid -> [(pid, 0), (pid, 1), (pid, 2)]) allpids
-trace = simpleRun (take 200 executionSequence) actors
+property2 (ExecutionSequence pids) = all property' (simpleRun pids actors)
+  where property' actors = not (all stuck actors)
+        stuck actor = M.null (actor ^. actorQueues) && isWaiting (view (actor ^. actorProgram))
+        isWaiting (WaitForMessage :>>= _) = True
+        isWaiting _ = False
 
-main = putStrLn (pretty executionSequence trace)
--}
+allpids = 0:1:2:allpids
+fairExecutionSequence = concatMap (\pid -> [(pid, 0), (pid, 1), (pid, 2)]) allpids
+fairTrace = simpleRun fairExecutionSequence actors
+
+owners = map extractOwner fairTrace
+  where extractOwner actors = fst <$> find isOwner (zip [0..] actors)
+        isOwner (pid, actor) = ownsTheResource pid (actor ^. actorState.requestQueue) (actor ^. actorState.lastSeenTimestamps)
+
+property3 = and [Just n `elem` owners | n <- [0,1,2]]
 
 main = do
-  Q.quickCheckWith (Q.stdArgs { Q.maxSuccess = 10000, Q.maxSize = 10000 }) property1
+  Q.quickCheckWith args property1
+  Q.quickCheckWith args property2
+  print property3
+
+  where args = Q.stdArgs { Q.maxSuccess = 1000, Q.maxSize = 1000 }
