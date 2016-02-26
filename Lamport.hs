@@ -18,6 +18,7 @@ import Data.List
 import qualified Data.Map.Strict as M
 import Control.Monad
 import Control.Monad.Operational
+import Control.Monad.Loops
 import Lens.Micro
 import Lens.Micro.TH
 import qualified Test.QuickCheck as Q
@@ -123,57 +124,102 @@ pretty pids (t:ts) = unlines (prettyActors t : zipWith prettyStep (pids) ts)
 
 {- Example -}
 
-data State = State { _counter :: Int, _lastReceived :: Int }
+data Msg = RequestResource | ReleaseResource | Ack
+  deriving Show
+
+data State = State {
+    _clock :: Int,
+    _lastSeenTimestamps :: M.Map ProcessId Int,
+    _requestQueue :: [(Int, ProcessId)] -- always sorted
+  }
   deriving Show
 
 makeLenses ''State
 
--- The program of a simple actor with a state of type State that sends and
--- receives messages of type Int. Calling getState, setState, sendMessage or
--- waitForMessage yields control back to the scheduler.
-program :: ProcessId -> ActorProgram State Int ()
-program otherPid = forever $ do
-  c <- get counter
-  sendMessage otherPid c
-  (_, n) <- waitForMessage
-  lastReceived .= n
-  counter .= c + 1
+addToRequestQueue ts pid =
+  requestQueue %= \queue -> sort ((ts,pid):queue)
+
+rmFromRequestQueue pid =
+  requestQueue %= filter (\(_, qid) -> qid /= pid)
+
+sendMessage' pid m = do
+  clock += 1
+  c <- get clock
+  sendMessage pid (c, m)
+
+waitForMessage' = do
+  clock += 1
+  (ts, m) <- waitForMessage
+  c <- get clock
+  when (ts > c) (clock .= ts)
+  return (ts, m)
+
+ownsTheResource myPid rq lastSeen =
+  not (null rq) &&
+  snd (head rq) == myPid &&
+  all (> fst (head rq)) (M.elems lastSeen)
+
+iOwnTheResource myPid =
+  ownsTheResource myPid <$> get requestQueue <*> get lastSeenTimestamps
+
+program :: ProcessId -> [ProcessId] -> ActorProgram State (Int, Msg) ()
+program myPid otherPids = forever $ do
+  iOwn <- iOwnTheResource myPid
+  if iOwn
+    then do
+      rmFromRequestQueue myPid
+      forM_ otherPids $ \pid -> do
+        sendMessage' pid ReleaseResource
+    else do
+      forM_ otherPids $ \pid -> do
+        sendMessage' pid RequestResource
+      ts <- get clock
+      addToRequestQueue ts myPid
+      whileM_ (not <$> iOwnTheResource myPid) $ do
+        (pid, (ots, msg)) <- waitForMessage'
+        lastSeenTimestamps %= M.insert pid ots
+        case msg of
+          RequestResource -> do
+            addToRequestQueue ots pid
+            sendMessage' pid Ack
+          ReleaseResource -> do
+            rmFromRequestQueue pid
+          _ -> return ()
 
 -- Two actors : (program 1) with initial state (State 0 0), and (program 0)
 -- with initial state (State 0 0).
 actors = [
-  (program 1, State 0 0),
-  (program 0, State 0 0)]
+  (program 0 [1,2], State 0 (M.fromList [(1,-1), (2,-1)]) [(-1,0)]),
+  (program 1 [0,2], State 0 (M.fromList [(0,-1), (2,-1)]) [(-1,0)]),
+  (program 2 [0,1], State 0 (M.fromList [(0,-1), (1,-1)]) [(-1,0)])]
+
 
 -- We define an alias for lists of pairs of pids that represent execution
 -- sequences. (The first element of a pair is the id of the process to advance,
 -- the second element is the process it should receive a message from if such a
--- message is waiting and the next execution step is to wait for a message.) It
+-- message is waiting and the next execution step is to wait for a messa ge.) It
 -- allows us to define custom instances for Arbitrary and Show.
 newtype ExecutionSequence = ExecutionSequence [(ProcessId, ProcessId)]
 
 instance Q.Arbitrary ExecutionSequence where
-  arbitrary = ExecutionSequence <$> Q.listOf ((,) <$> Q.elements [0, 1] <*> Q.elements [0,1])
+  arbitrary = ExecutionSequence <$> Q.listOf ((,) <$> Q.elements [0, 1, 2] <*> Q.elements [0, 1, 2])
   shrink (ExecutionSequence pids) = ExecutionSequence <$> Q.shrink pids
 
 instance Show ExecutionSequence where
   show (ExecutionSequence ns) = unlines [show ns, pretty ns (simpleRun ns actors)]
 
--- A property that holds for all execution sequences: that at any moment every
--- actor verifies abs(actor.counter - actor.lastReceived) <= 1.
-property1 (ExecutionSequence pids) = all (all property') (simpleRun pids actors)
-  where property' actor = abs (state ^. counter - state ^. lastReceived) <= 1
-          where state = actor ^. actorState
 
--- A property that doesn't hold for all execution sequences: that at any moment
--- every actor verifies actor.counter = actor.lastReceived
-property2 (ExecutionSequence pids) = all (all property') (simpleRun pids actors)
-  where property' actor = state ^. counter == state ^. lastReceived
-          where state = actor ^. actorState
+property1 (ExecutionSequence pids) = all property' (simpleRun pids actors)
+  where property' actors = length (filter id (zipWith owns [0..] actors)) <= 1
+        owns pid actor = ownsTheResource pid (actor ^. actorState.requestQueue) (actor ^. actorState.lastSeenTimestamps)
 
--- We use quickcheck to verify both properties. The first property passes 100
--- tests. A counter-example is found for the second property and is then shrunk
--- into a minimal counter-example.
+{-
+allpids = 0:1:2:allpids
+executionSequence = concatMap (\pid -> [(pid, 0), (pid, 1), (pid, 2)]) allpids
+trace = simpleRun (take 200 executionSequence) actors
+
+main = putStrLn (pretty executionSequence trace)
+-}
+
 main = do
-  Q.quickCheck property1
-  Q.quickCheck property2
+  Q.quickCheckWith (Q.stdArgs { Q.maxSuccess = 10000, Q.maxSize = 10000 }) property1
