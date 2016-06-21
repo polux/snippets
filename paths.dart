@@ -73,5 +73,9 @@ main() {
         new Tree("d", [])]),
       new Tree("e", [])
     ]);
-  print(paths(tree));
+  var t = new Tree("t1", [tree, tree]);
+  for (var i=0; i < 20; i++) {
+  t = new Tree("foo", [t, t]);
+  }
+  print(paths(t));
 }

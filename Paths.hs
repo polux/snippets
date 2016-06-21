@@ -20,8 +20,10 @@ paths :: Tree a -> [Path a]
 paths tree = paths' [] tree
 
 paths' :: Path a -> Tree a -> [Path a]
-paths' prefix (Node x []) = [x:prefix]
-paths' prefix (Node x children) = concatMap (paths' (x:prefix)) children
+paths' prefix (Node x children)
+  | null children = [prefix']
+  | otherwise = concatMap (paths' prefix') children
+  where prefix' = x : prefix
 
 tree =
   Node "a" [
