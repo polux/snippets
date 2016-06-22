@@ -12,9 +12,12 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
+{-# LANGUAGE TemplateHaskell #-}
+
 module Main where
 
 import Test.LazySmallCheck
+import Test.Feat
 
 data Expr = A | B | C | Not Expr | And Expr Expr | Or Expr Expr | Xor Expr Expr
   deriving Show
@@ -22,24 +25,32 @@ data Expr = A | B | C | Not Expr | And Expr Expr | Or Expr Expr | Xor Expr Expr
 instance Serial Expr where
   series = cons0 A \/ cons0 B \/ cons0 C \/ cons1 Not \/ cons2 And \/ cons2 Or \/ cons2 Xor
 
-interp a b c = interp'
-  where interp' A = lift a
-        interp' B = lift b
-        interp' C = lift c
-        interp' (Not e) = neg (interp' e)
-        interp' (And e1 e2) = interp' e1 *&* interp' e2
-        interp' (Or e1 e2) = interp' e1 *|* interp' e2
-        interp' (Xor e1 e2) = interp' e1 *=* neg (interp' e2)
+deriveEnumerable ''Expr
 
-isNot3Xor e =
-      neg (interp True False False e)
-  *|* neg (interp False True False e)
-  *|* neg (interp False False True e)
-  *|* interp False False False e
-  *|* interp True True False e
-  *|* interp True False True e
-  *|* interp False True True e
-  *|* interp True True True e
+eval lift and or eq not a b c = eval'
+  where eval' A = lift a
+        eval' B = lift b
+        eval' C = lift c
+        eval' (Not e) = not (eval' e)
+        eval' (And e1 e2) = eval' e1 `and` eval' e2
+        eval' (Or e1 e2) = eval' e1 `or` eval' e2
+        eval' (Xor e1 e2) = eval' e1 `eq` not (eval' e2)
 
-main :: IO ()
-main = smallCheck 10 isNot3Xor
+isNotXor3 lift and or eq not e =
+       not (eval' True False False e)
+  `or` not (eval' False True False e)
+  `or` not (eval' False False True e)
+  `or` eval' False False False e
+  `or` eval' True True False e
+  `or` eval' True False True e
+  `or` eval' False True True e
+  `or` eval' True True True e
+    where
+      eval' = eval lift and or eq not
+
+isNotXor3Prop = isNotXor3 lift (*&*) (*|*) (*=*) neg
+isNotXor3Pred = isNotXor3 id (&&) (||) (==) not
+
+main = do
+  featCheck 10 isNotXor3Pred
+  smallCheck 10 isNotXor3Prop
