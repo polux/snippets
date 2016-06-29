@@ -25,7 +25,7 @@ We would like to add a `pause` construct to our programming language (here
 Dart). The meaning of `pause` would be: "yield back control to the scheduler and
 wake me up later".
 
-~~~
+~~~{.dart}
 int foo(int n) {
   print(n);
   pause;
@@ -40,7 +40,7 @@ int foo(int n) {
 We call a function that uses `pause` a coroutine. We would then have a way to
 run a bunch of coroutines concurrently and collect their return values:
 
-~~~
+~~~{.dart}
 main() {
   var results = run([foo(0), foo(10)]);
   print("results = $results");
@@ -70,7 +70,7 @@ a continuation or a value when it's done. Something like
 `Computation = Paused(continuation) | Done(value)` if we had algebraic datatypes
 in Dart. We don't so we encode it as two classes.
 
-~~~
+~~~{.dart}
 class Computation {}
 
 class Paused implements Computation {
@@ -87,7 +87,7 @@ class Done implements Computation {
 Now we can rewrite `foo` to return suspended computations whenever there was
 a `pause` in our original version.
 
-~~~
+~~~{.dart}
 Computation foo(int n) {
   print(n);
   return new Paused(() {
@@ -105,7 +105,7 @@ Computation foo(int n) {
 We can now define `run`, which round-robins through the computations and calls
 the paused ones until everyone is done:
 
-~~~
+~~~{.dart}
 List run(List<Computation> computations) {
   while (!computations.every((c) => c is Done)) {
     for (int i = 0; i < computations.length; i++) {
@@ -138,7 +138,7 @@ results = [2, 22]
 This encoding does not compose well. In our imaginary language with `pause` we
 expect to be able to write:
 
-~~~
+~~~{.dart}
 int twoTimesFoo(int n) {
   var m = foo(n);
   return foo(m);
@@ -159,7 +159,7 @@ Running `foo(0)` would then print
 and return `4`. Encoding `twoTimesFoo` using `Computation`s isn't
 straightforward though. We could try something like this:
 
-~~~
+~~~{.dart}
 Computation twoTimesFoo(int n) {
   var mlist = run([foo(n)]);
   return foo(mlist.single);
@@ -186,7 +186,7 @@ But the call to `run` inside `twoTimesFoo` is "atomic" from the point of view
 of the outer `run`, the one inside `main`. We can see this is the case by
 running two `twoTimesFoo`s concurrently:
 
-~~~
+~~~{.dart}
 main() {
   print(run([twoTimesFoo(0), twoTimesFoo(10)]))
 }
@@ -213,7 +213,7 @@ Which prints:
 This is not what we want. We want `0, 10, 1, 11, 2, 12, ...`. So the actual
 correct way of encoding `twoTimesFoo` is:
 
-~~~
+~~~{.dart}
 Computation twoTimesFoo(int n) {
   return twoTimesFooAux(foo(n));
 }
@@ -253,7 +253,7 @@ We introduce the method `then` on `Computation`s which does exactly that. It
 takes computation and a function that expects a value and returns a computation.
 We use it like this:
 
-~~~
+~~~{.dart}
 Computation twoTimesFoo(int n) {
   return foo(n).then((m) {
     return foo(m);
@@ -275,7 +275,7 @@ be fed to that function.
 
 Here is how `then` is defined in Dart:
 
-~~~
+~~~{.dart}
 class Computation {
   Computation then(Function f);
 }
