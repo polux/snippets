@@ -22,7 +22,6 @@ import qualified Data.Text as T
 import Network.IRC.Client
 import System.Environment (getArgs)
 import System.Random (randomRIO)
-import Control.Monad.Trans.Class (lift)
 import Data.Monoid ((<>))
 import Data.Text.IRC.Color (rainbow)
 import Data.Random.Normal (normalIO')
