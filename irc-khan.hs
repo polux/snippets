@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
-{- stack --resolver lts-7.16 --install-ghc runghc --package irc-client -}
+{- stack --resolver lts-7.16 --install-ghc runghc --package irc-client --package irc-colors --package normaldistribution -}
 
 -- Copyright 2017 Google Inc. All Rights Reserved.
 --
@@ -24,6 +24,8 @@ import System.Environment (getArgs)
 import System.Random (randomRIO)
 import Control.Monad.Trans.Class (lift)
 import Data.Monoid ((<>))
+import Data.Text.IRC.Color (rainbow)
+import Data.Random.Normal (normalIO')
 
 run :: B.ByteString -> Int -> T.Text -> T.Text -> IO ()
 run host port nick channel = do
@@ -43,8 +45,8 @@ khanHandler = EventHandler
 
 sayKhan :: UnicodeEvent -> IRC ()
 sayKhan e@(Event _ _ (Privmsg _ (Right "!khan"))) = do
-  n <- lift (randomRIO (1, 15))
-  reply e ("Kh" <> T.replicate n "a" <> "n!")
+  n <- lift (ceiling <$> normalIO' (5 :: Double, 2))
+  reply e (rainbow ("Kh" <> T.replicate n "a" <> "n!"))
 sayKhan _ = return ()
 
 main = do
