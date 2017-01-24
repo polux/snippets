@@ -1,5 +1,20 @@
 #!/usr/bin/env stack
-{- stack --resolver lts-7.16 --install-ghc runghc --package irc-client --package irc-colors --package normaldistribution -}
+{-
+  stack
+  --resolver lts-7.16
+  --install-ghc
+  runghc
+  --package base
+  --package bytestring
+  --package irc-client
+  --package irc-colors
+  --package normaldistribution
+  --package random
+  --package text
+  --package transformers
+  --
+  -hide-all-packages
+-}
 
 -- Copyright 2017 Google Inc. All Rights Reserved.
 --
@@ -19,12 +34,13 @@
 
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Text as T
+import Control.Monad.Trans.Class (lift)
+import Data.Monoid ((<>))
+import Data.Random.Normal (normalIO')
+import Data.Text.IRC.Color (rainbow)
 import Network.IRC.Client
 import System.Environment (getArgs)
 import System.Random (randomRIO)
-import Data.Monoid ((<>))
-import Data.Text.IRC.Color (rainbow)
-import Data.Random.Normal (normalIO')
 
 run :: B.ByteString -> Int -> T.Text -> T.Text -> IO ()
 run host port nick channel = do
