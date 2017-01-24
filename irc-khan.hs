@@ -59,7 +59,7 @@ khanHandler = EventHandler
   }
 
 sayKhan :: UnicodeEvent -> IRC ()
-sayKhan e@(Event _ _ (Privmsg _ (Right "!khan"))) = do
+sayKhan e@(Event _ _ (Privmsg _ (Right msg))) | "!khan" `T.isInfixOf` msg = do
   n <- lift (ceiling <$> normalIO' (5 :: Double, 2))
   reply e (rainbow ("Kh" <> T.replicate n "a" <> "n!"))
 sayKhan _ = return ()
