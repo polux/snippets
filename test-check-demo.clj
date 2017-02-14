@@ -12,8 +12,6 @@
 ; See the License for the specific language governing permissions and
 ; limitations under the License.
 
-(ns clfeat.core)
-
 (require '[clojure.test.check :as tc])
 (require '[clojure.test.check.generators :as gen])
 (require '[clojure.test.check.properties :as prop])
