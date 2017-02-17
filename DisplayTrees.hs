@@ -3,7 +3,7 @@
   stack
   --resolver lts-8.0
   --install-ghc
-  runghc
+  exec
   --package base
   --package diagrams
   --package diagrams-lib
@@ -11,7 +11,7 @@
   --package testing-feat
   --package diagrams-contrib
   --
-  -hide-all-packages
+  ghc -O2
 -}
 
 -- Copyright 2017 Google Inc. All Rights Reserved.
@@ -34,13 +34,15 @@ import Diagrams.Prelude hiding (Empty)
 import Diagrams.TwoD.Layout.Tree
 import Diagrams.TwoD.Layout.Grid
 import Diagrams.TwoD.Text
-import Diagrams.Backend.Rasterific.CmdLine
+import Diagrams.Backend.Rasterific
 import Test.Feat
 import Control.Monad
+import Text.Printf
 
 deriveEnumerable ''BTree
 
 type BT = BTree ()
+type BTT = BTree (BTree ())
 
 drawTree :: BTree (Diagram B) -> Diagram B
 drawTree tree =
@@ -62,9 +64,17 @@ decorateBtt Empty = BNode (circle 0.2 # fc black) Empty Empty
 
 drawTreeOfTrees t = drawTree (decorateBtt t)
 
-treeOfTrees :: BTree (BTree ())
-treeOfTrees = select 79 (39533034221095268 * 2 `div` 3)
+images :: Int -> [Diagram B]
+images n = map normalize imgs
+  where imgs = map draw trees
+        (V2 w h) = boxExtents (mconcat (map boundingBox imgs))
+        bgrect = rect (w+10) (h+11) # fc white # lw 0
+        normalize img = img <> bgrect
+        draw t = centerXY (drawTreeOfTrees t # bg white)
+        (_, trees) = values !! n
 
-main = do
-  --print (take 100 (zip [0..] (map fst (values :: [(Integer, [BTT])]))))
-  defaultMain (drawTreeOfTrees treeOfTrees # bg white)
+main = zipWithM_ render [0::Int ..] (images 19)
+  where render i img = renderRasterific (filePath i) size img
+        filePath i = printf "/tmp/out_%04d.png" i
+        size = mkWidth 600
+
