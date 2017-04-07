@@ -115,10 +115,10 @@ choice' :: Strategy -> Strategy -> Strategy
 choice' s1 s2 t = s1 t <|> s2 t
 
 all' :: Strategy -> Strategy
-all' s (Appl f ts) = Appl f <$> traverse s ts
+all' s (Appl f ts) = fmap (Appl f) (traverse s ts)
 
 one' :: Strategy -> Strategy
-one' s (Appl f ts) = Appl f <$> first ts
+one' s (Appl f ts) = fmap (Appl f) (first ts)
   where
     first [] = Nothing
     first (t:ts) = fmap (:ts) (s t) <|> fmap (t:) (first ts)
