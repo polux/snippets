@@ -112,7 +112,7 @@ sequence' :: Strategy -> Strategy -> Strategy
 sequence' = (>=>)
 
 choice' :: Strategy -> Strategy -> Strategy
-choice' s1 s2 t = s1 t <|> s2 t
+choice' = liftA2 (<|>)
 
 all' :: Strategy -> Strategy
 all' s (Appl f ts) = fmap (Appl f) (traverse s ts)
