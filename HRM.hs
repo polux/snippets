@@ -280,7 +280,7 @@ run m = case step m of
           Left e -> [Left e]
           Right m' -> Right m' : run m'
 
-threeSort = makeMachine 4 [] program input
+threeSort = makeMachine 4 [] (execWriter program) input
   where input = [3,1,34,5,1,7,5,9,7,2,78,9]
         -- names
         tmp = 3
@@ -307,7 +307,7 @@ threeSort = makeMachine 4 [] program input
           copyFrom a
           sub b
         -- main
-        program = execWriter $ do
+        program = do
           loop =: do
             read 0
             read 1
