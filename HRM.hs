@@ -328,7 +328,7 @@ run m = case step m of
           Left e -> [Left e]
           Right m' -> Right m' : run m'
 
-sort = makeMachine 25 [(zero, 0)] (runHRM program) input
+sorter = makeMachine 25 [(zero, 0)] (runHRM program) input
   where input = [2,3,2,4,1,0,1,0]
         -- names
         zero = 24
@@ -346,39 +346,41 @@ sort = makeMachine 25 [(zero, 0)] (runHRM program) input
           copyToAt a2
         -- main
         program = mdo
-          init <- label
-          do copyFrom zero
-             copyTo i
-             bumpDown i
+          copyFrom zero
+          copyTo i
+          bumpDown i
+
           start <- label
-          do bumpUp i
-             inbox
-             jumpZero flush
-             copyToAt i
-             copyFrom i
-             copyTo j
-             copyTo predJ
-             bumpDown predJ
+          bumpUp i
+          inbox
+          jumpZero flush
+          copyToAt i
+          copyFrom i
+          copyTo j
+          copyTo predJ
+          bumpDown predJ
+
           insert <- label
-          do jumpNeg start
-             copyFromAt j
-             subAt predJ
-             jumpNeg start
-             swapAt j predJ tmp
-             bumpDown j
-             bumpDown predJ
-             jump insert
+          jumpNeg start
+          copyFromAt j
+          subAt predJ
+          jumpNeg start
+          swapAt j predJ tmp
+          bumpDown j
+          bumpDown predJ
+          jump insert
+
           flush <- label
-          do bumpDown i
-             jumpNeg start
-             copyFromAt i
-             outbox
-             jump flush
+          bumpDown i
+          jumpNeg start
+          copyFromAt i
+          outbox
+          jump flush
 
 main :: IO ()
 main = do
-  let trace = run sort
+  let trace = run sorter
   mapM_ pPrint trace
-  print (wellFormed sort)
-  print (numCommands sort)
+  print (wellFormed sorter)
+  print (numCommands sorter)
   print (length trace)
