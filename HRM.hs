@@ -33,6 +33,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE RecursiveDo #-}
 
 module Main where
 
@@ -43,7 +45,8 @@ import Text.Show.Pretty
 import qualified Data.Set as S
 import qualified Data.Map as M
 import qualified Data.Array as A
-import Control.Monad.Trans.Writer
+import Control.Monad.Fix
+import Control.Monad.Trans.RWS
 import Lens.Micro
 import Lens.Micro.GHC
 import Lens.Micro.TH
@@ -66,68 +69,75 @@ data Instruction
   | BumpDown Address
   | BumpUpAt Address
   | BumpDownAt Address
-  | Label Label
   | Jump Label
   | JumpZero Label
   | JumpNeg Label
   deriving (Show)
 
-inbox :: Writer [Instruction] ()
-inbox = tell [Inbox]
+newtype HRM a = HRM (RWS () [Instruction] Label a)
+  deriving (Functor, Applicative, Monad, MonadFix)
 
-outbox :: Writer [Instruction] ()
-outbox = tell [Outbox]
+writeInstruction :: Instruction -> HRM ()
+writeInstruction instr = HRM $ do
+  tell [instr]
+  modify succ
 
-copyTo :: Address -> Writer [Instruction] ()
-copyTo address = tell [CopyTo address]
+runHRM :: HRM () -> [Instruction]
+runHRM (HRM m) = let (_, _, is) = runRWS m () 0 in is
 
-copyFrom :: Address -> Writer [Instruction] ()
-copyFrom address = tell [CopyFrom address]
+inbox :: HRM ()
+inbox = writeInstruction Inbox
 
-copyToAt :: Address -> Writer [Instruction] ()
-copyToAt address = tell [CopyToAt address]
+outbox :: HRM ()
+outbox = writeInstruction Outbox
 
-copyFromAt :: Address -> Writer [Instruction] ()
-copyFromAt address = tell [CopyFromAt address]
+copyTo :: Address -> HRM ()
+copyTo address = writeInstruction (CopyTo address)
 
-add :: Address -> Writer [Instruction] ()
-add address = tell [Add address]
+copyFrom :: Address -> HRM ()
+copyFrom address = writeInstruction (CopyFrom address)
 
-sub :: Address -> Writer [Instruction] ()
-sub address = tell [Sub address]
+copyToAt :: Address -> HRM ()
+copyToAt address = writeInstruction (CopyToAt address)
 
-addAt :: Address -> Writer [Instruction] ()
-addAt address = tell [AddAt address]
+copyFromAt :: Address -> HRM ()
+copyFromAt address = writeInstruction (CopyFromAt address)
 
-subAt :: Address -> Writer [Instruction] ()
-subAt address = tell [SubAt address]
+add :: Address -> HRM ()
+add address = writeInstruction (Add address)
 
-bumpUp :: Address -> Writer [Instruction] ()
-bumpUp address = tell [BumpUp address]
+sub :: Address -> HRM ()
+sub address = writeInstruction (Sub address)
 
-bumpDown :: Address -> Writer [Instruction] ()
-bumpDown address = tell [BumpDown address]
+addAt :: Address -> HRM ()
+addAt address = writeInstruction (AddAt address)
 
-bumpUpAt :: Address -> Writer [Instruction] ()
-bumpUpAt address = tell [BumpUpAt address]
+subAt :: Address -> HRM ()
+subAt address = writeInstruction (SubAt address)
 
-bumpDownAt :: Address -> Writer [Instruction] ()
-bumpDownAt address = tell [BumpDownAt address]
+bumpUp :: Address -> HRM ()
+bumpUp address = writeInstruction (BumpUp address)
 
-label :: Label -> Writer [Instruction] ()
-label label = tell [Label label]
+bumpDown :: Address -> HRM ()
+bumpDown address = writeInstruction (BumpDown address)
 
-(=:) :: Label -> Writer [Instruction] () -> Writer [Instruction] ()
-l =: code = do { label l ; code }
+bumpUpAt :: Address -> HRM ()
+bumpUpAt address = writeInstruction (BumpUpAt address)
 
-jump :: Label -> Writer [Instruction] ()
-jump label = tell [Jump label]
+bumpDownAt :: Address -> HRM ()
+bumpDownAt address = writeInstruction (BumpDownAt address)
 
-jumpZero :: Label -> Writer [Instruction] ()
-jumpZero label = tell [JumpZero label]
+label :: HRM Label
+label = HRM get
 
-jumpNeg :: Label -> Writer [Instruction] ()
-jumpNeg label = tell [JumpNeg label]
+jump :: Label -> HRM ()
+jump label = writeInstruction (Jump label)
+
+jumpZero :: Label -> HRM ()
+jumpZero label = writeInstruction (JumpZero label)
+
+jumpNeg :: Label -> HRM ()
+jumpNeg label = writeInstruction (JumpNeg label)
 
 data Machine = Machine
   { _instructions :: A.Array Int Instruction
@@ -147,6 +157,7 @@ data Error
   | ReadFromEmptyCell
   | ReadFromEmptyRegister
   | ReadFromEmptyInbox
+  | ReadOutOfRange
   deriving (Show)
 
 makeMachine :: Int -> [(Address, Int)] -> [Instruction] -> [Int] -> Machine
@@ -168,17 +179,13 @@ minValue = -999
 
 allDiff xs = length (S.fromList xs) == length xs
 
-wellFormed :: Machine -> Bool
 wellFormed Machine{..} =
   all inRange (catMaybes (A.elems _memory))
   && all inRange _input
   && all (< numCells) addresses
-  && allDiff labels
-  && (S.fromList references) `S.isSubsetOf` (S.fromList labels)
 
   where instructionList = A.elems _instructions
         numCells = length _instructions
-        labels = [label | Label label <- instructionList]
         addresses = concatMap address instructionList
         address (CopyTo a) = [a]
         address (CopyFrom a) = [a]
@@ -193,40 +200,21 @@ wellFormed Machine{..} =
         address (BumpUpAt a) = [a]
         address (BumpDownAt a) = [a]
         address _ = []
-        references = concatMap reference instructionList
-        reference (Jump l) = [l]
-        reference (JumpZero l) = [l]
-        reference (JumpNeg l) = [l]
-        reference _ = []
         inRange i = minValue <= i && i <= maxValue
 
-numCommands Machine{..} = sum (map cost (A.elems _instructions))
-  where cost (Label _) = 0
-        cost _ = 1
-
-findLabelIndex instructions l = find isLabel (range (A.bounds instructions))
-  where isLabel i =
-          case instructions A.! i of
-            Label l' -> l' == l
-            _ -> False
+numCommands Machine{..} = length _instructions
 
 step :: Machine -> Either Error Machine
 step m@Machine{..} =
   case _instructions A.! _pc of
-    Label _ ->
-      Right $ m & pc %~ succ
     Jump l ->
-      Right $ m & pc .~ findLabel l
-    JumpZero l ->
-      case _register of
-        Just i -> Right $
-          m & pc .~ (if i == 0 then findLabel l else succ _pc)
-        Nothing -> Left ReadFromEmptyRegister
-    JumpNeg l ->
-      case _register of
-        Just i -> Right $
-          m & pc .~ (if i < 0 then findLabel l else succ _pc)
-        Nothing -> Left ReadFromEmptyRegister
+      Right $ m & pc .~ l
+    JumpZero l -> do
+      i <- readRegister
+      return $ m & pc .~ (if i == 0 then l else succ _pc)
+    JumpNeg l -> do
+      i <- readRegister
+      return $ m & pc .~ (if i < 0 then l else succ _pc)
     Inbox ->
       case _input of
         (x:xs) -> Right $
@@ -234,101 +222,163 @@ step m@Machine{..} =
             & input .~ xs
             & pc %~ succ
         [] -> Left ReadFromEmptyInbox
-    Outbox ->
-      case _register of
-        Just x -> Right $
-          m & register .~ Nothing
-            & output %~ (x:)
-            & pc %~ succ
-    CopyTo a ->
-      case _register of
-        Just i -> Right $
-          m & memory . ix a .~ Just i
-            & pc %~ succ
-        Nothing -> Left ReadFromEmptyRegister
-    CopyFrom a ->
-      case _memory A.! a of
-        Just i -> Right $
-          m & register .~ Just i
-            & pc %~ succ
-        Nothing -> Left ReadFromEmptyCell
-    Add a ->
-      case _memory A.! a of
-        Just j ->
-          case _register of
-            Just i -> Right $
-              m & register .~ Just (i+j)
-                & pc %~ succ
-            Nothing -> Left ReadFromEmptyRegister
-        Nothing -> Left ReadFromEmptyCell
-    Sub a ->
-      case _memory A.! a of
-        Just j ->
-          case _register of
-            Just i -> Right $
-              m & register .~ Just (i-j)
-                & pc %~ succ
-            Nothing -> Left ReadFromEmptyRegister
-        Nothing -> Left ReadFromEmptyCell
-    _ ->
-      error "not implemented"
+    Outbox -> do
+      i <- readRegister
+      return $
+        m & register .~ Nothing
+          & output %~ (i:)
+          & pc %~ succ
+    CopyTo a -> do
+      i <- readRegister
+      return $
+        m & memory . ix a .~ Just i
+          & pc %~ succ
+    CopyFrom a -> do
+      i <- readAt a
+      return $
+        m & register .~ Just i
+          & pc %~ succ
+    CopyToAt a -> do
+      i <- readRegister
+      b <- readAt a
+      return $
+        m & memory . ix b .~ Just i
+          & pc %~ succ
+    CopyFromAt a -> do
+      b <- readAt a
+      i <- readAt b
+      return $
+        m & register .~ Just i
+          & pc %~ succ
+    Add a -> do
+      i <- readRegister
+      j <- readAt a
+      return $
+        m & register .~ Just (i+j)
+          & pc %~ succ
+    Sub a -> do
+      i <- readRegister
+      j <- readAt a
+      return $
+        m & register .~ Just (i-j)
+          & pc %~ succ
+    AddAt a -> do
+      i <- readRegister
+      b <- readAt a
+      j <- readAt b
+      return $
+        m & register .~ Just (i+j)
+          & pc %~ succ
+    SubAt a -> do
+      i <- readRegister
+      b <- readAt a
+      j <- readAt b
+      return $
+        m & register .~ Just (i-j)
+          & pc %~ succ
+    BumpUp a -> do
+      i <- readAt a
+      let v = Just (succ i)
+      return $
+        m & register .~ v
+          & memory . ix a .~ v
+          & pc %~ succ
+    BumpDown a -> do
+      i <- readAt a
+      let v = Just (pred i)
+      return $
+        m & register .~ v
+          & memory . ix a .~ v
+          & pc %~ succ
+    BumpUpAt a -> do
+      b <- readAt a
+      i <- readAt b
+      let v = Just (succ i)
+      return $
+        m & register .~ v
+          & memory . ix b .~ v
+          & pc %~ succ
+    BumpDownAt a -> do
+      b <- readAt a
+      i <- readAt b
+      let v = Just (pred i)
+      return $
+        m & register .~ v
+          & memory . ix b .~ v
+          & pc %~ succ
 
-  where findLabel l = fromJust (findLabelIndex _instructions l)
+  where inRange a = a >= low && a <= high
+
+        (low, high) = A.bounds _memory
+
+        readRegister =
+          case _register of
+            Just i -> Right i
+            Nothing -> Left ReadFromEmptyRegister
+
+        readAt a =
+          if inRange a
+            then case _memory A.! a of
+              Just i -> Right i
+              Nothing -> Left ReadFromEmptyCell
+            else Left ReadOutOfRange
 
 run :: Machine -> [Either Error Machine]
 run m = case step m of
           Left e -> [Left e]
           Right m' -> Right m' : run m'
 
-threeSort = makeMachine 4 [] (execWriter program) input
-  where input = [3,1,34,5,1,7,5,9,7,2,78,9]
+sort = makeMachine 25 [(zero, 0)] (runHRM program) input
+  where input = [2,3,2,4,1,0,1,0]
         -- names
-        tmp = 3
-        -- labels
-        loop = 0
-        l1 = 1
-        l2 = 2
-        l3 = 3
+        zero = 24
+        tmp = 23
+        i = 22
+        j = 21
+        predJ = 20
         -- macros
-        swap i j t = do
-          copyFrom i
-          copyTo t
-          copyFrom j
-          copyTo i
-          copyFrom t
-          copyTo j
-        read a = do
-          inbox
-          copyTo a
-        write a = do
-          copyFrom a
-          outbox
-        compare a b = do
-          copyFrom a
-          sub b
+        swapAt a1 a2 tmp = do
+          copyFromAt a1
+          copyTo tmp
+          copyFromAt a2
+          copyToAt a1
+          copyFrom tmp
+          copyToAt a2
         -- main
-        program = do
-          loop =: do
-            read 0
-            read 1
-            read 2
-          l1 =: do
-            compare 0 1
-            jumpNeg l2
-            swap 0 1 tmp
-          l2 =: do
-            compare 1 2
-            jumpNeg l3
-            swap 1 2 tmp
-            jump l1
-          l3 =: do
-            write 0
-            write 1
-            write 2
-            jump loop
+        program = mdo
+          init <- label
+          do copyFrom zero
+             copyTo i
+             bumpDown i
+          start <- label
+          do bumpUp i
+             inbox
+             jumpZero flush
+             copyToAt i
+             copyFrom i
+             copyTo j
+             copyTo predJ
+             bumpDown predJ
+          insert <- label
+          do jumpNeg start
+             copyFromAt j
+             subAt predJ
+             jumpNeg start
+             swapAt j predJ tmp
+             bumpDown j
+             bumpDown predJ
+             jump insert
+          flush <- label
+          do bumpDown i
+             jumpNeg start
+             copyFromAt i
+             outbox
+             jump flush
 
 main :: IO ()
 main = do
-  print (wellFormed threeSort)
-  print (numCommands threeSort)
-  mapM_ pPrint (run threeSort)
+  let trace = run sort
+  mapM_ pPrint trace
+  print (wellFormed sort)
+  print (numCommands sort)
+  print (length trace)
