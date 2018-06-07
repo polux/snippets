@@ -42,7 +42,8 @@ data Instr
   = Assign String Expr
   | If Expr Instr Instr
   | While Expr Instr
-  | Block [Instr]
+  | Seq Instr Instr
+  | Noop
   deriving (Show)
 
 {- Concrete interpreter -}
@@ -73,7 +74,8 @@ evalInstr (If e i1 i2) s = if ve then evalInstr i1 s else evalInstr i2 s
   where VBool ve = evalExpr e s
 evalInstr (While e i) s = if ve then evalInstr (While e i) (evalInstr i s) else s
   where VBool ve = evalExpr e s
-evalInstr (Block is) s = foldl (flip evalInstr) s is
+evalInstr (Seq i1 i2) s = evalInstr i2 (evalInstr i1 s)
+evalInstr Noop s = s
 
 {- Abstract interpreter -}
 
@@ -151,7 +153,8 @@ aEvalInstr (While e i) s =
     AFalse -> s
     AnyBool -> fixpoint i s
   where AVBool ve = aEvalExpr e s
-aEvalInstr (Block is) s = foldl (flip aEvalInstr) s is
+aEvalInstr (Seq i1 i2) s = aEvalInstr i2 (aEvalInstr i1 s)
+aEvalInstr Noop s = s
 
 fixpoint i s =
   let s' = aEvalInstr i s
@@ -159,14 +162,16 @@ fixpoint i s =
 
 {- Example -}
 
+block = foldl1 Seq
+
 example =
-  Block [
+  block [
     "x" `Assign` IntLit (-1),
     If (Var "x" `Lt` IntLit (-2))
       ("y" `Assign` IntLit 1)
       ("y" `Assign` IntLit 2),
     While (Var "x" `Lt` Var "y")
-      (Block [
+      (block [
         "x" `Assign` (Var "x" `Plus` IntLit 3),
         "y" `Assign` (Var "y" `Plus` IntLit 1)
       ])
