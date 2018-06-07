@@ -1,4 +1,13 @@
-{- stack runghc --package Earley-0.12.0.0 -}
+#!/usr/bin/env stack
+{-
+  stack
+  --resolver lts-11.10
+  --install-ghc
+  runghc
+  --package Earley
+  --
+  -hide-all-packages
+-}
 
 -- Copyright 2017 Google Inc. All Rights Reserved.
 --
