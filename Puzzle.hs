@@ -1,3 +1,17 @@
+#!/usr/bin/env stack
+{-
+  stack
+  --resolver lts-11.10
+  --install-ghc
+  runghc
+  --package base
+  --package containers
+  --package monadplus
+  --package text
+  --
+  -hide-all-packages
+-}
+
 -- Copyright 2016 Google Inc. All Rights Reserved.
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
@@ -88,7 +102,7 @@ example =
   , Piece "S" White Red White Red
   , Piece "T" White Blue White Blue
   , Piece "U" Red Blue Red Blue
-  , Piece "V" White Blue Red Red 
+  , Piece "V" White Blue Red Red
   , Piece "W" White Red White Blue
   , Piece "X" White White Red Blue]
 
