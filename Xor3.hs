@@ -1,3 +1,15 @@
+#!/usr/bin/env stack
+{-
+  stack
+  --resolver lts-11.12
+  --install-ghc
+  runghc
+  --package lazysmallcheck-0.6
+  --package testing-feat
+  --
+  -hide-all-packages
+-}
+
 -- Copyright 2016 Google Inc. All Rights Reserved.
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
