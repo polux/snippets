@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack --resolver lts-14.17 script
+-- stack runghc --resolver lts-14.17 --package sym
 
 -- Copyright 2018 Google LLC. All Rights Reserved.
 --
@@ -18,17 +18,23 @@
 import Data.Function
 import Data.List
 import System.Random
+import Sym.Perm (Perm, toList, unrank)
+import Sym.Perm.Stat (fp)
 
-candidates xs =
-  permutations xs
-    & map (zip xs)
-    & filter (not . any isSelfAssignment)
+candidates n indices =
+  map (unrank n) indices
+    & filter isDerangement
+    & map toList
  where
-  isSelfAssignment (x,y) = x == y
+  isDerangement perm = fp perm == 0
 
-numPeople = 5
+fact :: Integer -> Integer
+fact n = product [1..n]
+
+numPeople :: Integer
+numPeople = 150
 
 main = do
-  let assignments = candidates [1..numPeople]
-  index <- randomRIO (0, length assignments - 1)
-  print (assignments !! index)
+  gen <- newStdGen
+  let indices = randomRs (0, fact numPeople -1) gen
+  print (head $ candidates (fromInteger numPeople) indices)
