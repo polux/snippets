@@ -1,0 +1,35 @@
+{
+    "debug.console.fontSize": 12,
+    "editor.lineNumbers": "off",
+    "editor.minimap.enabled": false,
+    "editor.fontFamily": "'Source Code Pro'",
+    "editor.fontWeight": "500",
+    "workbench.colorTheme": "Yi Light",
+    "editor.fontSize": 13,
+    "files.trimTrailingWhitespace": true,
+    "editor.tabSize": 2,
+    "maptz.regionfolder": {
+        "[haskell]": {
+            "foldEnd": "-- #endregion",
+            "foldEndRegex": "--[\\s]*#endregion",
+            "foldStart": "-- #region [NAME]",
+            "foldStartRegex": "--[\\s]*#region[\\s]*(.*)",
+            "disableFolding": false
+        }
+    },
+    "workbench.startupEditor": "newUntitledFile",
+    "[haskell]": {
+        "editor.defaultFormatter": "haskell.haskell"
+    },
+    "haskell.formattingProvider": "fourmolu",
+    "telemetry.telemetryLevel": "off",
+    "haskell.manageHLS": "GHCup",
+    "gitlens.codeLens.enabled": false,
+    "editor.guides.indentation": false,
+    "magicRacket.languageServer.enabled": false,
+    "files.watcherExclude": {
+        "**/.bloop": true,
+        "**/.metals": true,
+        "**/.ammonite": true
+    }
+}
